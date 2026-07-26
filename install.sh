@@ -48,6 +48,9 @@ sh "$INSTALL_DIR/illusion/install-waf-app.sh" || true
 
 /usr/sbin/mntroot ro || true
 
+# upstart only picks up a newly dropped .conf after a config reload; without
+# this the job stays "Unknown" (so the start below fails) until a reboot.
+/sbin/initctl reload-configuration || true
 /sbin/initctl restart kindle-button-mapper || /sbin/initctl start kindle-button-mapper
 
 echo "Installed. Open Button Mapper from the Kindle library or via:"
