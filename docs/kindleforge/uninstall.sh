@@ -11,6 +11,9 @@ APP_ID="com.lzampier.mappermanager"
 /usr/sbin/mntroot rw
 
 rm -f /etc/upstart/kindle-button-mapper.conf
+# Drop the job from upstart now that its .conf is gone, so it isn't left as a
+# known-but-fileless job until the next reboot.
+/sbin/initctl reload-configuration 2>/dev/null || true
 
 if [ -f "$APPREG_DB" ]; then
     sqlite3 "$APPREG_DB" <<EOF
