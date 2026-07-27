@@ -1,29 +1,24 @@
 mod config;
 mod input;
-mod layout;
 mod mapper;
 mod pause;
 mod vkeyboard;
 mod waf_helper;
 
 use config::Config;
-use evdev::uinput::VirtualDevice;
-use evdev::{EventType, InputEvent, InputEventKind};
+use evdev::InputEventKind;
 use input::InputHandler;
-use layout::LayoutOverride;
 use log::{error, info, warn};
 use mapper::Mapper;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::signal::{signal, SigHandler, Signal};
 use std::env;
+use std::io::Write;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsRawFd;
-use std::process::{self, Command};
-use std::sync::{Arc, Mutex};
+use std::process::{self, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-
-type SharedKeyboard = Option<Arc<Mutex<VirtualDevice>>>;
 
 const KEEP_AWAKE_INTERVAL: Duration = Duration::from_secs(60);
 const KEEP_AWAKE_POKE: &str = "lipc-set-prop -i com.lab126.powerd touchScreenSaverTimeout 1";
@@ -94,18 +89,7 @@ fn main() {
     // Virtual keyboard via uinput — kept alive for the daemon's lifetime.
     // The path is written to /var/run/kindle-button-mapper-key-target so
     // scripts/key.sh can inject events into it.
-    let vkeyboard: SharedKeyboard = vkeyboard::try_init().map(|d| Arc::new(Mutex::new(d)));
-
-    // Keyboard layout is a system-wide XKB override, so it's set up once for the
-    // daemon's lifetime rather than per device. The first device that names a
-    // layout wins. Held to keep the bind-mount alive; the upstart post-stop job
-    // unmounts on stop since SIGTERM skips Drop.
-    let _layout = config
-        .devices
-        .iter()
-        .find_map(|d| d.keyboard_layout.as_deref())
-        .filter(|l| !l.is_empty())
-        .and_then(LayoutOverride::new);
+    let _vkeyboard = vkeyboard::try_init();
 
     let mut handles = Vec::new();
     let settings = WorkerSettings {
@@ -120,10 +104,9 @@ fn main() {
     for device in config.devices {
         let id = device.id.clone();
         let settings = settings.clone();
-        let vkbd = vkeyboard.clone();
         let h = thread::Builder::new()
             .name(format!("dev:{}", id))
-            .spawn(move || device_worker(device, settings, vkbd))
+            .spawn(move || device_worker(device, settings))
             .expect("spawn device thread");
         handles.push(h);
     }
@@ -150,7 +133,7 @@ struct WorkerSettings {
     on_disconnect: Option<String>,
 }
 
-fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings, vkeyboard: SharedKeyboard) {
+fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings) {
     let mut mapper = Mapper::new(
         &cfg,
         settings.debounce_ms,
@@ -168,13 +151,11 @@ fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings, vkeyboard:
                     info!("[{}] running on_connect script", cfg.id);
                     execute_script(script);
                 }
-                if let Err(e) = run_event_loop(
-                    &mut device,
-                    &mut mapper,
-                    cfg.grab,
-                    settings.keep_awake,
-                    vkeyboard.as_ref(),
-                ) {
+                if let Some(ref layout) = cfg.keyboard_layout {
+                    info!("[{}] applying keyboard layout '{}'", cfg.id, layout);
+                    apply_keyboard_layout(layout);
+                }
+                if let Err(e) = run_event_loop(&mut device, &mut mapper, cfg.grab, settings.keep_awake) {
                     error!("[{}] event loop error: {}", cfg.id, e);
                     if let Some(ref script) = settings.on_disconnect {
                         info!("[{}] device disconnected, running on_disconnect script", cfg.id);
@@ -191,13 +172,7 @@ fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings, vkeyboard:
     }
 }
 
-fn run_event_loop(
-    device: &mut evdev::Device,
-    mapper: &mut Mapper,
-    grab: bool,
-    keep_awake: bool,
-    vkeyboard: Option<&Arc<Mutex<VirtualDevice>>>,
-) -> Result<(), String> {
+fn run_event_loop(device: &mut evdev::Device, mapper: &mut Mapper, grab: bool, keep_awake: bool) -> Result<(), String> {
     // Non-blocking + poll so we can notice a capture pause while idle.
     set_nonblocking(device.as_raw_fd());
     let mut grabbed = grab;
@@ -251,28 +226,11 @@ fn run_event_loop(
             match event.kind() {
                 InputEventKind::Key(key) => {
                     activity = true;
-                    if mapper.is_mapped(key) {
-                        match event.value() {
-                            1 => mapper.handle_press(key),   // Press
-                            2 => mapper.handle_held(key),    // Held/repeat
-                            0 => mapper.handle_release(key), // Release
-                            _ => {}
-                        }
-                    } else if grabbed {
-                        // The device is grabbed, so unmapped keys won't reach the
-                        // framework on their own — re-inject them through the
-                        // virtual keyboard. (When ungrabbed the framework already
-                        // sees them, so re-injecting would double every key.) The
-                        // layout override maps whichever path the keys take.
-                        if let Some(vkbd) = vkeyboard {
-                            if let Ok(mut d) = vkbd.lock() {
-                                let _ = d.emit(&[InputEvent::new(
-                                    EventType::KEY,
-                                    key.code(),
-                                    event.value(),
-                                )]);
-                            }
-                        }
+                    match event.value() {
+                        1 => mapper.handle_press(key),  // Press
+                        2 => mapper.handle_held(key),   // Held/repeat
+                        0 => mapper.handle_release(key), // Release
+                        _ => {}
                     }
                 }
                 InputEventKind::AbsAxis(axis) => {
@@ -333,3 +291,31 @@ fn execute_script(script: &str) {
     }
 }
 
+const XKB_DISPLAY: &str = ":0";
+
+fn apply_keyboard_layout(layout: &str) {
+    let keymap = format!(
+        "xkb_keymap {{\n\
+         \x20 xkb_keycodes {{ include \"evdev+aliases(qwerty)\" }};\n\
+         \x20 xkb_types {{ include \"complete\" }};\n\
+         \x20 xkb_compat {{ include \"complete\" }};\n\
+         \x20 xkb_symbols {{ include \"pc+{layout}\" }};\n\
+         \x20 xkb_geometry {{ include \"pc(pc105)\" }};\n\
+         }};\n"
+    );
+    let mut child = match Command::new("xkbcomp")
+        .args(["-I/usr/share/X11/xkb", "-", XKB_DISPLAY])
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            error!("xkbcomp failed to start: {}", e);
+            return;
+        }
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(keymap.as_bytes());
+    }
+    let _ = child.wait();
+}
