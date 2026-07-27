@@ -10,7 +10,7 @@ A Rust-based Linux input device event mapper for Kindle e-readers. Maps button p
 - Debouncing to prevent double-triggers
 - Auto-reconnect on device disconnect
 - Optional exclusive device grab
-- Per-keyboard XKB layout, re-applied on every reconnect
+- Non-US keyboard layout via XKB override, with optional Alt+Shift toggle
 
 ## Building
 
@@ -51,7 +51,7 @@ on_disconnect = /path/to/script.sh
 name = Device Name
 uniq = AA:BB:CC:DD:EE:FF   # Bluetooth MAC; matched first when set
 grab = true
-# keyboard_layout = fr     # XKB layout re-applied whenever this keyboard connects
+# keyboard_layout = fr     # XKB layout override (comma list for an Alt+Shift toggle, e.g. us,ru)
 
 [device.gamepad.buttons]
 # button_code = /path/to/script.sh
@@ -76,7 +76,7 @@ Devices are matched by identity, never by `/dev/input/eventX` path (that index i
 unstable across reconnects): the mapper uses the Bluetooth MAC (`uniq`) when set,
 otherwise the device `name`. Set at least one.
 
-Set `keyboard_layout` to an XKB layout code (e.g. `fr`, `de`, `ro`, `fr(oss)`) to remap a Bluetooth keyboard. The mapper re-applies it on every connect, so the layout survives reconnects instead of reverting to US. Leave it unset to keep the system default.
+Set `keyboard_layout` to an XKB layout code (e.g. `fr`, `de`, `ro`, `fr(oss)`) to type correctly on a non-US Bluetooth keyboard. The reader re-pins the `us` core keymap on every focus and `/usr/share/X11/xkb` is read-only, so the mapper bind-mounts a generated `us` symbols file over the system one; every re-pin then resolves to your layout, reverted when the daemon stops. Give a comma list for an Alt+Shift toggle (`us,ru`); it's a system-wide override taken from the first device that sets one. Leave it unset to keep the system default.
 
 Use `log_buttons = true` to discover button codes for your device.
 

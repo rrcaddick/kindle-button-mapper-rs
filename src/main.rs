@@ -1,5 +1,6 @@
 mod config;
 mod input;
+mod layout;
 mod mapper;
 mod pause;
 mod vkeyboard;
@@ -8,15 +9,15 @@ mod waf_helper;
 use config::Config;
 use evdev::InputEventKind;
 use input::InputHandler;
+use layout::LayoutOverride;
 use log::{error, info, warn};
 use mapper::Mapper;
 use nix::poll::{poll, PollFd, PollFlags};
 use nix::sys::signal::{signal, SigHandler, Signal};
 use std::env;
-use std::io::Write;
 use std::os::fd::BorrowedFd;
 use std::os::unix::io::AsRawFd;
-use std::process::{self, Command, Stdio};
+use std::process::{self, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -91,6 +92,14 @@ fn main() {
     // scripts/key.sh can inject events into it.
     let _vkeyboard = vkeyboard::try_init();
 
+    // System-wide XKB override, set up once. First device that names a layout wins.
+    let _layout = config
+        .devices
+        .iter()
+        .find_map(|d| d.keyboard_layout.as_deref())
+        .filter(|l| !l.is_empty())
+        .and_then(LayoutOverride::new);
+
     let mut handles = Vec::new();
     let settings = WorkerSettings {
         debounce_ms: config.debounce_ms,
@@ -150,10 +159,6 @@ fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings) {
                 if let Some(ref script) = settings.on_connect {
                     info!("[{}] running on_connect script", cfg.id);
                     execute_script(script);
-                }
-                if let Some(ref layout) = cfg.keyboard_layout {
-                    info!("[{}] applying keyboard layout '{}'", cfg.id, layout);
-                    apply_keyboard_layout(layout);
                 }
                 if let Err(e) = run_event_loop(&mut device, &mut mapper, cfg.grab, settings.keep_awake) {
                     error!("[{}] event loop error: {}", cfg.id, e);
@@ -291,31 +296,3 @@ fn execute_script(script: &str) {
     }
 }
 
-const XKB_DISPLAY: &str = ":0";
-
-fn apply_keyboard_layout(layout: &str) {
-    let keymap = format!(
-        "xkb_keymap {{\n\
-         \x20 xkb_keycodes {{ include \"evdev+aliases(qwerty)\" }};\n\
-         \x20 xkb_types {{ include \"complete\" }};\n\
-         \x20 xkb_compat {{ include \"complete\" }};\n\
-         \x20 xkb_symbols {{ include \"pc+{layout}\" }};\n\
-         \x20 xkb_geometry {{ include \"pc(pc105)\" }};\n\
-         }};\n"
-    );
-    let mut child = match Command::new("xkbcomp")
-        .args(["-I/usr/share/X11/xkb", "-", XKB_DISPLAY])
-        .stdin(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            error!("xkbcomp failed to start: {}", e);
-            return;
-        }
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(keymap.as_bytes());
-    }
-    let _ = child.wait();
-}
