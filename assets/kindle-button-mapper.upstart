@@ -11,3 +11,8 @@ console none
 script
     exec /mnt/us/kindle-button-mapper/kindle-button-mapper /mnt/us/kindle-button-mapper/config.ini >>/var/log/kindle-button-mapper.log 2>&1
 end script
+
+# SIGTERM skips Drop, so undo the layout override here.
+post-stop script
+    umount /usr/share/X11/xkb/symbols/us 2>/dev/null || true
+end script
