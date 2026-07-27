@@ -5,6 +5,7 @@ A Rust-based Linux input device event mapper for Kindle e-readers. Maps button p
 ## Features
 
 - Map buttons to shell scripts
+- Page turns and reader controls for both the native Kindle reader and KOReader
 - Long press support with separate actions
 - Auto-repeat when buttons are held
 - Debouncing to prevent double-triggers
@@ -80,6 +81,20 @@ Set `keyboard_layout` to an XKB layout code (e.g. `fr`, `de`, `ro`, `fr(oss)`) t
 
 Use `log_buttons = true` to discover button codes for your device.
 
+### Reader actions
+
+Two helper scripts ship with the mapper, so a binding can drive either reader:
+
+| | `scripts/kindle.sh` (native reader) | `scripts/koreader.sh` (KOReader) |
+|---|---|---|
+| How it talks to the reader | virtual keyboard + `lipc` | HTTP Inspector on `localhost:8080` |
+| Setup needed | none | HTTP Inspector auto-start |
+| Actions | `next_page`, `prev_page`, `home`, `back`, `toolbar`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `menu`, `night_mode`, `rotate`, `font_up`/`font_down`, `toggle_status_bar`, `brightness <n>`, `brightness_toggle` |
+
+The native reader takes `KEY_DOWN` as next page and `KEY_UP` as previous page, so
+`kindle.sh` turns pages through the daemon's own uinput keyboard — no touch
+injection and no coordinates to get wrong. Everything else goes over `lipc`.
+
 `keep_awake = true` (default) resets the screensaver timer on input so the device stays awake while a controller is connected, without blocking the power button.
 
 ## On-device UI (MapperManager WAF)
@@ -99,7 +114,7 @@ ssh kindle "sh /mnt/us/kindle-button-mapper/illusion/install-waf-app.sh"   # fir
 ```
 
 The app has three tabs:
-- **Bindings** — list of current button / D-pad / trigger mappings per device. Tap *+ Add* to capture a button and pick an action. Each binding can map to a KOReader command, a keyboard key, or a custom shell command.
+- **Bindings** — list of current button / D-pad / trigger mappings per device. Tap *+ Add* to capture a button and pick an action. The action picker opens on **Kindle** (native reader) and also offers **KOReader**, a keyboard key, or a custom shell command.
 - **Device** — list of configured devices, each matched by its Bluetooth MAC or name. Add, edit, or remove a device, or tap one seen on `/dev/input` to prefill its name and MAC.
 - **Debug** — live button capture for discovering codes, and a raw `config.ini` editor.
 
@@ -133,6 +148,7 @@ Uninstall: `ssh kindle "sh /mnt/us/kindle-button-mapper/uninstall.sh"` (the scri
 - Jailbroken Kindle (Kindle 5+ / FW 5.x).
 - Linux kernel with evdev (`/dev/input/eventX`) — present on all stock Kindles.
 - An input device the Kindle can see — e.g. a Bluetooth gamepad/remote bridged via [kindle-hid-passthrough](https://github.com/zampierilucas/kindle-hid-passthrough), or any USB OTG HID device.
+- Nothing extra for the native Kindle reader — `scripts/kindle.sh` only needs the daemon running.
 - **KOReader HTTP Inspector** (for KOReader integration): enable auto-start once in KOReader → *Tools → More Tools → HTTP Inspector → Auto-start HTTP server*. The default mappings in `scripts/koreader.sh` send commands to `localhost:8080`. MapperManager warns you in the KOReader action tab when this auto-start is off.
 
 ## Hardware

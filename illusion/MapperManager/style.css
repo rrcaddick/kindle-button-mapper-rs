@@ -475,9 +475,9 @@ html, body {
 
 .action-tab {
     float: left;
-    width: 33.33%;
+    width: 25%;
     padding: 14px 0;
-    font-size: 32px;
+    font-size: 28px;
     font-weight: bold;
     background: #fff;
     color: #000;
