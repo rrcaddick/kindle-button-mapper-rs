@@ -17,7 +17,7 @@ var MapperManager = (function() {
     var ini = null;            // parsed config
     var pendingSlot = null;    // slot object awaiting an action pick
     var captureXhrAbort = null;
-    var actionTab = "kindle";   // which tab is showing in the action picker
+    var actionTab = "auto";     // which tab is showing in the action picker
     var currentDeviceId = null; // currently selected device on Bindings tab
     var editingDeviceId = null; // device being edited in the detail overlay (null = new)
     var continuousCapture = false; // when true, re-fire capture after each action pick
@@ -414,7 +414,9 @@ var MapperManager = (function() {
 
     function extractAction(script) {
         if (!script) return { kind: "other", id: "" };
-        var m = script.match(/kindle\.sh\s+(.+?)\s*$/);
+        var m = script.match(/auto\.sh\s+(.+?)\s*$/);
+        if (m) return { kind: "auto", id: m[1].replace(/^\s+|\s+$/g, "") };
+        m = script.match(/kindle\.sh\s+(.+?)\s*$/);
         if (m) return { kind: "kindle", id: m[1].replace(/^\s+|\s+$/g, "") };
         m = script.match(/koreader\.sh\s+(.+?)\s*$/);
         if (m) return { kind: "koreader", id: m[1].replace(/^\s+|\s+$/g, "") };
@@ -440,7 +442,8 @@ var MapperManager = (function() {
             return null;
         }
         var list = actionsForKind(parsed.kind);
-        var prefix = parsed.kind === "koreader" ? "KOReader: " : "";
+        var prefix = parsed.kind === "koreader" ? "KOReader: "
+                   : parsed.kind === "kindle" ? "Kindle: " : "";
         for (var j = 0; j < list.length; j++) {
             if (list[j].id === parsed.id) return prefix + list[j].label;
         }
@@ -457,7 +460,10 @@ var MapperManager = (function() {
         if (kind === "koreader") {
             return "/mnt/us/kindle-button-mapper/scripts/koreader.sh " + actionId;
         }
-        return "/mnt/us/kindle-button-mapper/scripts/kindle.sh " + actionId;
+        if (kind === "kindle") {
+            return "/mnt/us/kindle-button-mapper/scripts/kindle.sh " + actionId;
+        }
+        return "/mnt/us/kindle-button-mapper/scripts/auto.sh " + actionId;
     }
 
     // ---- Slot picker (Add) ----
@@ -581,8 +587,9 @@ var MapperManager = (function() {
         var parsed = extractAction(existing);
         actionTab = parsed.kind === "keyboard" ? "keyboard"
                   : parsed.kind === "koreader" ? "koreader"
+                  : parsed.kind === "kindle" ? "kindle"
                   : parsed.kind === "other" && existing ? "custom"
-                  : "kindle";
+                  : "auto";
         filteredKeys = keyboardKeys();
         getEl("actionSearch").value = "";
         getEl("actionCustomCmd").value = (parsed.kind === "other" && existing) ? existing : "";
@@ -605,6 +612,7 @@ var MapperManager = (function() {
         getEl("actionList").style.display = isCustom ? "none" : "block";
 
         if (actionTab === "koreader") refreshKoreaderStatus();
+        else if (actionTab === "auto") showAutoNote();
         else getEl("koreaderStatus").className = "koreader-status hidden";
 
         if (isCustom) return;
@@ -618,6 +626,13 @@ var MapperManager = (function() {
         var list = getEl("actionList");
         list.innerHTML = html;
         list.scrollTop = 0;
+    }
+
+    function showAutoNote() {
+        var el = getEl("koreaderStatus");
+        el.className = "koreader-status";
+        el.innerHTML = "Goes to KOReader when it is running with the HTTP Inspector on, "
+            + "and to the native reader otherwise \u2014 one binding covers both.";
     }
 
     function refreshKoreaderStatus() {
