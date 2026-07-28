@@ -268,7 +268,9 @@ fn ensure_event_node(path: &Path, sysdir: &Path) -> io::Result<()> {
     let status = Command::new("mknod")
         .args([&path.display().to_string(), "c", major, minor])
         .status()?;
-    if !status.success() {
+    // devtmpfs can beat us to the node between the check above and here, and
+    // that mknod failure is not one worth losing the keyboard over.
+    if !status.success() && !path.exists() {
         return Err(io::Error::other(format!(
             "mknod {} exit {}",
             path.display(),
