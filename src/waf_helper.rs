@@ -12,20 +12,32 @@ const INPUT_DIR: &str = "/dev/input";
 const INITCTL: &str = "/sbin/initctl";
 const SERVICE: &str = "kindle-button-mapper";
 
-const ACTIONS: &[(&str, &str)] = &[
-    ("next_page", "Next page"),
-    ("prev_page", "Previous page"),
-    ("brightness 1", "Brightness +1"),
-    ("brightness -1", "Brightness -1"),
-    ("brightness 10", "Brightness +10"),
-    ("brightness -10", "Brightness -10"),
-    ("brightness_toggle", "Toggle frontlight"),
-    ("night_mode", "Toggle night mode"),
-    ("font_up 1", "Font +1"),
-    ("font_down 1", "Font -1"),
-    ("menu", "Show menu"),
-    ("toggle_status_bar", "Toggle status bar"),
-    ("rotate", "Rotate screen"),
+// (kind, id, label) — kind matches the tab in the WAF action picker and
+// selects the script the binding is written against.
+const ACTIONS: &[(&str, &str, &str)] = &[
+    ("kindle", "next_page", "Next page"),
+    ("kindle", "prev_page", "Previous page"),
+    ("kindle", "home", "Home screen"),
+    ("kindle", "back", "Back"),
+    ("kindle", "toolbar", "Toggle toolbar"),
+    ("kindle", "brightness 1", "Brightness +1"),
+    ("kindle", "brightness -1", "Brightness -1"),
+    ("kindle", "brightness 5", "Brightness +5"),
+    ("kindle", "brightness -5", "Brightness -5"),
+    ("kindle", "brightness_toggle", "Toggle frontlight"),
+    ("koreader", "next_page", "Next page"),
+    ("koreader", "prev_page", "Previous page"),
+    ("koreader", "brightness 1", "Brightness +1"),
+    ("koreader", "brightness -1", "Brightness -1"),
+    ("koreader", "brightness 10", "Brightness +10"),
+    ("koreader", "brightness -10", "Brightness -10"),
+    ("koreader", "brightness_toggle", "Toggle frontlight"),
+    ("koreader", "night_mode", "Toggle night mode"),
+    ("koreader", "font_up 1", "Font +1"),
+    ("koreader", "font_down 1", "Font -1"),
+    ("koreader", "menu", "Show menu"),
+    ("koreader", "toggle_status_bar", "Toggle status bar"),
+    ("koreader", "rotate", "Rotate screen"),
 ];
 
 static CAPTURE_LOCK: Mutex<()> = Mutex::new(());
@@ -261,7 +273,14 @@ fn devices_json() -> String {
 fn actions_json() -> String {
     let items: Vec<String> = ACTIONS
         .iter()
-        .map(|(id, label)| format!("{{\"id\":\"{}\",\"label\":\"{}\"}}", esc(id), esc(label)))
+        .map(|(kind, id, label)| {
+            format!(
+                "{{\"kind\":\"{}\",\"id\":\"{}\",\"label\":\"{}\"}}",
+                esc(kind),
+                esc(id),
+                esc(label)
+            )
+        })
         .collect();
     format!("{{\"ok\":true,\"actions\":[{}]}}", items.join(","))
 }

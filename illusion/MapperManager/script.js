@@ -11,13 +11,13 @@ var MapperManager = (function() {
     var MESSAGE_TIMEOUT = 4000;
 
     var messageTimer = null;
-    var actions = [];          // [{id, label}] from /actions
+    var actions = [];          // [{kind, id, label}] from /actions
     var layouts = [];          // [{code, name}] from /layouts
     var devices = [];          // [{path, name, uniq}]
     var ini = null;            // parsed config
     var pendingSlot = null;    // slot object awaiting an action pick
     var captureXhrAbort = null;
-    var actionTab = "koreader"; // which tab is showing in the action picker
+    var actionTab = "kindle";   // which tab is showing in the action picker
     var currentDeviceId = null; // currently selected device on Bindings tab
     var editingDeviceId = null; // device being edited in the detail overlay (null = new)
     var continuousCapture = false; // when true, re-fire capture after each action pick
@@ -414,19 +414,35 @@ var MapperManager = (function() {
 
     function extractAction(script) {
         if (!script) return { kind: "other", id: "" };
-        var m = script.match(/koreader\.sh\s+(.+?)\s*$/);
+        var m = script.match(/kindle\.sh\s+(.+?)\s*$/);
+        if (m) return { kind: "kindle", id: m[1].replace(/^\s+|\s+$/g, "") };
+        m = script.match(/koreader\.sh\s+(.+?)\s*$/);
         if (m) return { kind: "koreader", id: m[1].replace(/^\s+|\s+$/g, "") };
         m = script.match(/key\.sh\s+(.+?)\s*$/);
         if (m) return { kind: "keyboard", id: m[1].replace(/^\s+|\s+$/g, "") };
         return { kind: "other", id: script };
     }
 
+    function actionsForKind(kind) {
+        var out = [];
+        for (var i = 0; i < actions.length; i++) {
+            if (actions[i].kind === kind) out.push(actions[i]);
+        }
+        return out;
+    }
+
     function labelForAction(parsed) {
-        var list = parsed.kind === "keyboard" ? keyboardKeys() : actions;
-        for (var i = 0; i < list.length; i++) {
-            if (list[i].id === parsed.id) {
-                return (parsed.kind === "keyboard" ? "Key: " : "") + list[i].label;
+        if (parsed.kind === "keyboard") {
+            var keys = keyboardKeys();
+            for (var i = 0; i < keys.length; i++) {
+                if (keys[i].id === parsed.id) return "Key: " + keys[i].label;
             }
+            return null;
+        }
+        var list = actionsForKind(parsed.kind);
+        var prefix = parsed.kind === "koreader" ? "KOReader: " : "";
+        for (var j = 0; j < list.length; j++) {
+            if (list[j].id === parsed.id) return prefix + list[j].label;
         }
         return null;
     }
@@ -438,7 +454,10 @@ var MapperManager = (function() {
         if (kind === "custom") {
             return actionId;
         }
-        return "/mnt/us/kindle-button-mapper/scripts/koreader.sh " + actionId;
+        if (kind === "koreader") {
+            return "/mnt/us/kindle-button-mapper/scripts/koreader.sh " + actionId;
+        }
+        return "/mnt/us/kindle-button-mapper/scripts/kindle.sh " + actionId;
     }
 
     // ---- Slot picker (Add) ----
@@ -561,8 +580,9 @@ var MapperManager = (function() {
         var existing = pendingSlot ? getValue(pendingSlot.section, pendingSlot.key) : null;
         var parsed = extractAction(existing);
         actionTab = parsed.kind === "keyboard" ? "keyboard"
+                  : parsed.kind === "koreader" ? "koreader"
                   : parsed.kind === "other" && existing ? "custom"
-                  : "koreader";
+                  : "kindle";
         filteredKeys = keyboardKeys();
         getEl("actionSearch").value = "";
         getEl("actionCustomCmd").value = (parsed.kind === "other" && existing) ? existing : "";
@@ -589,7 +609,7 @@ var MapperManager = (function() {
 
         if (isCustom) return;
 
-        var items = isKbd ? filteredKeys : actions;
+        var items = isKbd ? filteredKeys : actionsForKind(actionTab);
         var html = "";
         for (var j = 0; j < items.length; j++) {
             html += '<div class="action-item" data-id="' + escapeHtml(items[j].id) + '">'

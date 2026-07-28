@@ -1,0 +1,84 @@
+#!/bin/sh
+# Native Kindle reader control.
+# Usage: kindle.sh <command> [args...]
+#
+# Commands:
+#   next_page         - Turn to next page
+#   prev_page         - Turn to previous page
+#   home              - Go to the home screen
+#   back              - Back / close the current view
+#   toolbar           - Toggle the reader toolbar
+#   brightness <n>    - Adjust frontlight (positive=up, negative=down)
+#   brightness_toggle - Toggle frontlight off/on
+#
+# Page turns go through the daemon's virtual keyboard: the native reader
+# takes KEY_DOWN as next page and KEY_UP as previous page. The rest is lipc.
+
+DIR=$(dirname "$0")
+LOG_PATH="/var/log/kindle-button-mapper.log"
+FL_SAVED="/var/run/kindle-button-mapper-fl"
+
+warn() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') WARN  kindle.sh: $1" >> "$LOG_PATH" 2>/dev/null
+}
+
+send_key() {
+    if ! "$DIR/key.sh" "$1" 2>/dev/null; then
+        warn "cannot inject $1; the daemon's virtual keyboard is not running"
+    fi
+}
+
+fl_get() { lipc-get-prop com.lab126.powerd flIntensity 2>/dev/null || echo 0; }
+fl_max() { lipc-get-prop com.lab126.powerd flMaxIntensity 2>/dev/null || echo 24; }
+fl_set() { lipc-set-prop com.lab126.powerd flIntensity "$1" 2>/dev/null; }
+
+case "$1" in
+    next_page)
+        send_key KEY_DOWN
+        ;;
+    prev_page)
+        send_key KEY_UP
+        ;;
+    home)
+        send_key KEY_HOME
+        ;;
+    back)
+        lipc-set-prop com.lab126.appmgrd kppBackButtonPress 1 2>/dev/null \
+            || warn "back: appmgrd not reachable"
+        ;;
+    toolbar)
+        state=$(lipc-get-prop com.lab126.winmgr chromeState 2>/dev/null || echo 0)
+        if [ "$state" = "0" ]; then
+            lipc-set-prop com.lab126.winmgr chromeState 1 2>/dev/null
+        else
+            lipc-set-prop com.lab126.winmgr chromeState 0 2>/dev/null
+        fi
+        ;;
+    brightness)
+        step="${2:-1}"
+        max=$(fl_max)
+        new=$(( $(fl_get) + step ))
+        [ "$new" -lt 0 ] && new=0
+        [ "$new" -gt "$max" ] && new="$max"
+        fl_set "$new"
+        ;;
+    brightness_toggle)
+        cur=$(fl_get)
+        if [ "$cur" -gt 0 ]; then
+            echo "$cur" > "$FL_SAVED" 2>/dev/null
+            fl_set 0
+        else
+            prev=$(cat "$FL_SAVED" 2>/dev/null)
+            case "$prev" in
+                ""|0|*[!0-9]*) prev=$(( $(fl_max) / 2 )) ;;
+            esac
+            fl_set "$prev"
+        fi
+        ;;
+    *)
+        echo "Usage: $0 <command> [args...]"
+        echo "Commands: next_page, prev_page, home, back, toolbar,"
+        echo "          brightness <n>, brightness_toggle"
+        exit 1
+        ;;
+esac
