@@ -1,26 +1,45 @@
 use log::{info, warn};
+use nix::sys::stat::Mode;
+use nix::unistd::mkfifo;
 use nix::{ioctl_none, ioctl_read_buf, ioctl_write_int};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
+use std::thread;
 
 const UINPUT_DEV: &str = "/dev/uinput";
 const TARGET_FILE: &str = "/var/run/kindle-button-mapper-key-target";
+const FIFO_PATH: &str = "/var/run/kindle-button-mapper-key.fifo";
+const FIFO_OWNER: &str = "/var/run/kindle-button-mapper-key-owner";
 const SYSFS_INPUT: &str = "/sys/devices/virtual/input";
 const DEV_INPUT: &str = "/dev/input";
 const DEV_NAME: &[u8] = b"kindle-button-mapper";
 
 const UINPUT_MAX_NAME_SIZE: usize = 80;
 const ABS_CNT: usize = 64;
-const EV_KEY: u32 = 0x01;
+const EV_KEY: u16 = 0x01;
+const EV_SYN: u16 = 0x00;
+const SYN_REPORT: u16 = 0x00;
 
 ioctl_none!(ui_dev_create, b'U', 1);
 ioctl_write_int!(ui_set_evbit, b'U', 100);
 ioctl_write_int!(ui_set_keybit, b'U', 101);
 ioctl_read_buf!(ui_get_sysname, b'U', 44, u8);
+
+// Kernel layout: the timestamp is a pair of kernel longs, not libc time_t —
+// musl 1.2 widened time_t to 64 bits on 32-bit ARM, which would make this
+// struct 8 bytes too long and every write fail with EINVAL.
+#[repr(C)]
+struct InputEvent {
+    tv_sec: isize,
+    tv_usec: isize,
+    kind: u16,
+    code: u16,
+    value: i32,
+}
 
 #[repr(C)]
 struct InputId {
@@ -70,11 +89,96 @@ pub fn try_init() -> Option<File> {
     Some(file)
 }
 
+/// Serve key injection requests on a FIFO, one key name (or code) per line.
+///
+/// scripts/key.sh writes to it, so nothing on the device needs an external
+/// injector binary — evemu-event is not shipped on stock firmware.
+pub fn serve(dev: File) {
+    // A FIFO left behind by a crashed daemon would block writers forever.
+    let _ = fs::remove_file(FIFO_PATH);
+    if let Err(e) = mkfifo(FIFO_PATH, Mode::from_bits_truncate(0o600)) {
+        warn!("Cannot create {}: {} — key injection unavailable", FIFO_PATH, e);
+        return;
+    }
+    // key.sh checks this pid before writing: opening a FIFO nobody reads blocks.
+    if let Err(e) = fs::write(FIFO_OWNER, process::id().to_string()) {
+        warn!("Cannot write {}: {}", FIFO_OWNER, e);
+    }
+    info!("Key injection FIFO at {}", FIFO_PATH);
+    thread::Builder::new()
+        .name("keyfifo".into())
+        .spawn(move || fifo_loop(dev))
+        .map(|_| ())
+        .unwrap_or_else(|e| warn!("Cannot spawn key FIFO thread: {}", e));
+}
+
+fn fifo_loop(mut dev: File) {
+    loop {
+        // Read/write so a writer closing does not end the loop, and so key.sh
+        // never blocks on open while the daemon is alive.
+        let fifo = match OpenOptions::new().read(true).write(true).open(FIFO_PATH) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Cannot open {}: {} — key injection stopped", FIFO_PATH, e);
+                return;
+            }
+        };
+        for line in BufReader::new(fifo).lines() {
+            match line {
+                Ok(l) => handle_request(&mut dev, l.trim()),
+                Err(e) => {
+                    warn!("{} read failed: {}", FIFO_PATH, e);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn handle_request(dev: &mut File, line: &str) {
+    if line.is_empty() {
+        return;
+    }
+    match crate::config::parse_key(line) {
+        Some(key) => {
+            if let Err(e) = tap(dev, key.code()) {
+                warn!("Injecting {} failed: {}", line, e);
+            }
+        }
+        None => warn!("Key FIFO: unknown key {:?}", line),
+    }
+}
+
+fn tap(dev: &mut File, code: u16) -> io::Result<()> {
+    write_event(dev, EV_KEY, code, 1)?;
+    write_event(dev, EV_SYN, SYN_REPORT, 0)?;
+    write_event(dev, EV_KEY, code, 0)?;
+    write_event(dev, EV_SYN, SYN_REPORT, 0)
+}
+
+fn write_event(dev: &mut File, kind: u16, code: u16, value: i32) -> io::Result<()> {
+    // The kernel stamps the time itself, so leaving it zero is fine.
+    let ev = InputEvent {
+        tv_sec: 0,
+        tv_usec: 0,
+        kind,
+        code,
+        value,
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&ev as *const InputEvent).cast::<u8>(),
+            mem::size_of::<InputEvent>(),
+        )
+    };
+    dev.write_all(bytes)
+}
+
 fn create_device() -> io::Result<File> {
     let file = OpenOptions::new().read(true).write(true).open(UINPUT_DEV)?;
     let fd = file.as_raw_fd();
 
-    unsafe { ui_set_evbit(fd, EV_KEY as _) }?;
+    unsafe { ui_set_evbit(fd, EV_KEY as u32 as _) }?;
     for code in supported_keys() {
         unsafe { ui_set_keybit(fd, code as _) }?;
     }

@@ -23,9 +23,7 @@ warn() {
 }
 
 send_key() {
-    if ! "$DIR/key.sh" "$1" 2>/dev/null; then
-        warn "cannot inject $1; the daemon's virtual keyboard is not running"
-    fi
+    err=$("$DIR/key.sh" "$1" 2>&1) || warn "cannot inject $1: ${err:-unknown error}"
 }
 
 fl_get() { lipc-get-prop com.lab126.powerd flIntensity 2>/dev/null || echo 0; }
