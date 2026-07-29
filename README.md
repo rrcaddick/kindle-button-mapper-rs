@@ -13,6 +13,27 @@ A Rust-based Linux input device event mapper for Kindle e-readers. Maps button p
 - Optional exclusive device grab
 - Non-US keyboard layout via XKB override, with optional Alt+Shift toggle
 
+## On-device UI
+
+| Bindings | Device | Debug | Action picker |
+|---|---|---|---|
+| ![Bindings](docs/screenshots/bindings.png) | ![Device](docs/screenshots/device.png) | ![Debug](docs/screenshots/debug.png) | ![Action picker](docs/screenshots/action-picker.png) |
+
+A touchscreen UI for editing mappings without SSH lives in `illusion/MapperManager/`. The daemon stays a plain runtime — the WAF app spawns a `--waf-helper` HTTP server (localhost:8322) only while the app is open, edits `config.ini`, and restarts the daemon via `initctl restart kindle-button-mapper`.
+
+Deploy and register:
+
+```bash
+just deploy        # ship the binary + config + init script
+just deploy-waf    # ship the illusion/ app, restart helper, launch WAF
+ssh kindle "sh /mnt/us/kindle-button-mapper/illusion/install-waf-app.sh"   # first time only
+```
+
+The app has three tabs:
+- **Bindings** — list of current button / D-pad / trigger mappings per device. Tap *+ Add* to capture a button and pick an action. The action picker opens on **Kindle** (native reader) and also offers **KOReader**, a keyboard key, or a custom shell command.
+- **Device** — list of configured devices, each matched by its Bluetooth MAC or name. Add, edit, or remove a device, or tap one seen on `/dev/input` to prefill its name and MAC.
+- **Debug** — live button capture for discovering codes, and a raw `config.ini` editor.
+
 ## Building
 
 ```bash
@@ -106,27 +127,6 @@ reader sees a normal button press. Everywhere else the native reader takes
 Everything else goes over `lipc`.
 
 `keep_awake = true` (default) resets the screensaver timer on input so the device stays awake while a controller is connected, without blocking the power button.
-
-## On-device UI (MapperManager WAF)
-
-| Bindings | Device | Debug | Action picker |
-|---|---|---|---|
-| ![Bindings](docs/screenshots/bindings.png) | ![Device](docs/screenshots/device.png) | ![Debug](docs/screenshots/debug.png) | ![Action picker](docs/screenshots/action-picker.png) |
-
-A touchscreen UI for editing mappings without SSH lives in `illusion/MapperManager/`. The daemon stays a plain runtime — the WAF app spawns a `--waf-helper` HTTP server (localhost:8322) only while the app is open, edits `config.ini`, and restarts the daemon via `initctl restart kindle-button-mapper`.
-
-Deploy and register:
-
-```bash
-just deploy        # ship the binary + config + init script
-just deploy-waf    # ship the illusion/ app, restart helper, launch WAF
-ssh kindle "sh /mnt/us/kindle-button-mapper/illusion/install-waf-app.sh"   # first time only
-```
-
-The app has three tabs:
-- **Bindings** — list of current button / D-pad / trigger mappings per device. Tap *+ Add* to capture a button and pick an action. The action picker opens on **Kindle** (native reader) and also offers **KOReader**, a keyboard key, or a custom shell command.
-- **Device** — list of configured devices, each matched by its Bluetooth MAC or name. Add, edit, or remove a device, or tap one seen on `/dev/input` to prefill its name and MAC.
-- **Debug** — live button capture for discovering codes, and a raw `config.ini` editor.
 
 ## Install from release
 
