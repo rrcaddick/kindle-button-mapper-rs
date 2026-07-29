@@ -96,12 +96,14 @@ if you read in both: it checks whether KOReader is answering on its HTTP
 Inspector port and routes there, falling back to the native reader. One binding
 per button covers both readers.
 
-The native reader takes `KEY_DOWN` as next page and `KEY_UP` as previous page, so
-`kindle.sh` turns pages through the daemon's own uinput keyboard — no touch
-injection and no coordinates to get wrong. The daemon holds that uinput device
-open and reads key names off `/var/run/kindle-button-mapper-key.fifo`, which is
-how `scripts/key.sh` injects without any external tool. Everything else goes
-over `lipc`.
+Page turns are injected, not tapped, so there are no coordinates to get wrong.
+The daemon reads requests off `/var/run/kindle-button-mapper-key.fifo`, which is
+how `scripts/key.sh` works without any external tool, and it picks the device.
+On a model with physical page buttons the framework only turns pages for that
+node, so the daemon writes `KEY_PAGEDOWN`/`KEY_PAGEUP` straight into it and the
+reader sees a normal button press. Everywhere else the native reader takes
+`KEY_DOWN` as next page and `KEY_UP` as previous page on the virtual keyboard.
+Everything else goes over `lipc`.
 
 `keep_awake = true` (default) resets the screensaver timer on input so the device stays awake while a controller is connected, without blocking the power button.
 

@@ -17,10 +17,15 @@ const FIFO_OWNER: &str = "/var/run/kindle-button-mapper-key-owner";
 const SYSFS_INPUT: &str = "/sys/devices/virtual/input";
 const DEV_INPUT: &str = "/dev/input";
 const DEV_NAME: &[u8] = b"kindle-button-mapper";
+const DEV_NAME_STR: &str = "kindle-button-mapper";
 
 const UINPUT_MAX_NAME_SIZE: usize = 80;
 const ABS_CNT: usize = 64;
 const EV_KEY: u16 = 0x01;
+const KEY_UP: u16 = 103;
+const KEY_PAGEUP: u16 = 104;
+const KEY_DOWN: u16 = 108;
+const KEY_PAGEDOWN: u16 = 109;
 const EV_SYN: u16 = 0x00;
 const SYN_REPORT: u16 = 0x00;
 
@@ -113,6 +118,7 @@ pub fn serve(dev: File) {
 }
 
 fn fifo_loop(mut dev: File) {
+    let mut pager = Pager::find();
     loop {
         // Read/write so a writer closing does not end the loop, and so key.sh
         // never blocks on open while the daemon is alive.
@@ -125,7 +131,7 @@ fn fifo_loop(mut dev: File) {
         };
         for line in BufReader::new(fifo).lines() {
             match line {
-                Ok(l) => handle_request(&mut dev, l.trim()),
+                Ok(l) => handle_request(&mut dev, &mut pager, l.trim()),
                 Err(e) => {
                     warn!("{} read failed: {}", FIFO_PATH, e);
                     break;
@@ -135,18 +141,97 @@ fn fifo_loop(mut dev: File) {
     }
 }
 
-fn handle_request(dev: &mut File, line: &str) {
-    if line.is_empty() {
-        return;
+fn handle_request(dev: &mut File, pager: &mut Pager, line: &str) {
+    match line {
+        "" => (),
+        "page_next" => pager.turn(dev, KEY_PAGEDOWN, KEY_DOWN),
+        "page_prev" => pager.turn(dev, KEY_PAGEUP, KEY_UP),
+        _ => match crate::config::parse_key(line) {
+            Some(key) => {
+                if let Err(e) = tap(dev, key.code()) {
+                    warn!("Injecting {} failed: {}", line, e);
+                }
+            }
+            None => warn!("Key FIFO: unknown key {:?}", line),
+        },
     }
-    match crate::config::parse_key(line) {
-        Some(key) => {
-            if let Err(e) = tap(dev, key.code()) {
-                warn!("Injecting {} failed: {}", line, e);
+}
+
+/// The device the reader takes page turns from.
+///
+/// Kindles with physical page buttons carry them on their own node, and the
+/// framework only turns pages for that node, ignoring page keys from any
+/// keyboard. Writing to an evdev node injects into the device itself, so a
+/// page turn goes in as if the button had been pressed. Models without the
+/// buttons take KEY_DOWN/KEY_UP on the virtual keyboard instead.
+enum Pager {
+    Buttons { path: PathBuf, node: Option<File> },
+    VirtualKeyboard,
+}
+
+impl Pager {
+    fn find() -> Self {
+        match page_button_node() {
+            Some(path) => {
+                info!("Page turns go to the page buttons at {}", path.display());
+                Pager::Buttons { path, node: None }
+            }
+            None => {
+                info!("No page buttons found, page turns go to the virtual keyboard");
+                Pager::VirtualKeyboard
             }
         }
-        None => warn!("Key FIFO: unknown key {:?}", line),
     }
+
+    fn turn(&mut self, vkbd: &mut File, button_code: u16, kbd_code: u16) {
+        match self {
+            Pager::Buttons { path, node } => {
+                if node.is_none() {
+                    match OpenOptions::new().write(true).open(&path) {
+                        Ok(f) => *node = Some(f),
+                        Err(e) => {
+                            warn!("Cannot open {}: {}", path.display(), e);
+                            return;
+                        }
+                    }
+                }
+                let f = node.as_mut().expect("opened above");
+                if let Err(e) = tap(f, button_code) {
+                    warn!("Page turn on {} failed: {}", path.display(), e);
+                    // Reopen next time, the node may have gone away.
+                    *node = None;
+                }
+            }
+            Pager::VirtualKeyboard => {
+                if let Err(e) = tap(vkbd, kbd_code) {
+                    warn!("Page turn failed: {}", e);
+                }
+            }
+        }
+    }
+}
+
+fn page_button_node() -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(DEV_INPUT)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("event"))
+        })
+        .filter(|p| {
+            evdev::Device::open(p).is_ok_and(|d| {
+                d.name() != Some(DEV_NAME_STR)
+                    && d.supported_keys().is_some_and(|k| {
+                        k.contains(evdev::Key::KEY_PAGEUP) && k.contains(evdev::Key::KEY_PAGEDOWN)
+                    })
+            })
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }
 
 fn tap(dev: &mut File, code: u16) -> io::Result<()> {
