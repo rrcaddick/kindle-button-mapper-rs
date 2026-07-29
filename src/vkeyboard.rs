@@ -221,17 +221,26 @@ fn page_button_node() -> Option<PathBuf> {
                 .and_then(|n| n.to_str())
                 .is_some_and(|n| n.starts_with("event"))
         })
-        .filter(|p| {
-            evdev::Device::open(p).is_ok_and(|d| {
-                d.name() != Some(DEV_NAME_STR)
-                    && d.supported_keys().is_some_and(|k| {
-                        k.contains(evdev::Key::KEY_PAGEUP) && k.contains(evdev::Key::KEY_PAGEDOWN)
-                    })
-            })
-        })
+        .filter(|p| evdev::Device::open(p).is_ok_and(is_page_buttons))
         .collect();
     found.sort();
     found.into_iter().next()
+}
+
+fn is_page_buttons(dev: evdev::Device) -> bool {
+    if dev.name() == Some(DEV_NAME_STR) {
+        return false;
+    }
+    // Built into the device, so a paired keyboard or gamepad that happens to
+    // carry page keys is never mistaken for the reader's own buttons.
+    if dev.input_id().bus_type() != evdev::BusType::BUS_HOST {
+        return false;
+    }
+    dev.supported_keys().is_some_and(|k| {
+        k.contains(evdev::Key::KEY_PAGEUP)
+            && k.contains(evdev::Key::KEY_PAGEDOWN)
+            && !k.contains(evdev::Key::KEY_A)
+    })
 }
 
 fn tap(dev: &mut File, code: u16) -> io::Result<()> {
