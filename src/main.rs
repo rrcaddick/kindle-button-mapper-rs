@@ -1,5 +1,7 @@
+mod action;
 mod config;
 mod input;
+mod koreader;
 mod layout;
 mod mapper;
 mod pause;

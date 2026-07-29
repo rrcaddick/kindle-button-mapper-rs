@@ -11,34 +11,32 @@
 #   brightness_toggle - Toggle frontlight off/on
 #   menu              - KOReader menu, native toolbar
 #
-# KOReader answers on its HTTP Inspector port when it is up, so a reachable
-# port means it is the reader in front of you. Everything else, including the
+# KOReader answers on its HTTP Inspector port when it is up, so a delivered
+# event means it is the reader in front of you. Trying it is the probe — a
+# separate one would only cost another curl. Everything else, including the
 # native-only commands (home, back, toolbar), goes to kindle.sh. The tap
 # variants only change how the native side turns the page, KOReader still gets
 # the HTTP event.
 
 DIR=$(dirname "$0")
-KOREADER_PROBE="http://localhost:8080/"
 
-koreader_up() {
-    curl -s --connect-timeout 1 -o /dev/null "$KOREADER_PROBE" 2>/dev/null
+try_koreader() {
+    KBM_QUIET=1 "$DIR/koreader.sh" "$@"
 }
 
 CMD="$1"
 case "$CMD" in
     next_page|prev_page|brightness|brightness_toggle|night_mode|font_up|font_down|toggle_status_bar|rotate)
-        koreader_up && exec "$DIR/koreader.sh" "$@"
+        try_koreader "$@" && exit 0
         ;;
     next_page_tap)
-        koreader_up && exec "$DIR/koreader.sh" next_page
+        try_koreader next_page && exit 0
         ;;
     prev_page_tap)
-        koreader_up && exec "$DIR/koreader.sh" prev_page
+        try_koreader prev_page && exit 0
         ;;
     menu)
-        if koreader_up; then
-            exec "$DIR/koreader.sh" menu
-        fi
+        try_koreader menu && exit 0
         exec "$DIR/kindle.sh" toolbar
         ;;
     "")

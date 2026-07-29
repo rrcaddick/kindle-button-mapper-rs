@@ -8,6 +8,7 @@ use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 const UINPUT_DEV: &str = "/dev/uinput";
@@ -94,6 +95,25 @@ pub fn try_init() -> Option<File> {
     Some(file)
 }
 
+/// Shared by the FIFO thread and in-process callers.
+static INJECTOR: OnceLock<Mutex<Injector>> = OnceLock::new();
+
+struct Injector {
+    dev: Option<File>,
+    pager: Pager,
+}
+
+/// Inject a key name, a key code, `page_next` or `page_prev`. False means there
+/// is nothing to inject into, so the caller can fall back to a tap.
+pub fn inject(request: &str) -> bool {
+    let Some(injector) = INJECTOR.get() else {
+        return false;
+    };
+    let mut injector = injector.lock().unwrap_or_else(|p| p.into_inner());
+    injector.handle(request.trim());
+    true
+}
+
 /// Serve key injection requests on a FIFO, one key name (or code) per line.
 ///
 /// scripts/key.sh writes to it, so nothing on the device needs an external
@@ -107,6 +127,10 @@ pub fn serve(dev: Option<File>) {
     let pager = Pager::find();
     if dev.is_none() && matches!(pager, Pager::VirtualKeyboard) {
         warn!("No page buttons and no uinput keyboard — nothing to inject into, use the tap page turn actions");
+        return;
+    }
+    if INJECTOR.set(Mutex::new(Injector { dev, pager })).is_err() {
+        warn!("Virtual keyboard already serving");
         return;
     }
 
@@ -123,12 +147,12 @@ pub fn serve(dev: Option<File>) {
     info!("Key injection FIFO at {}", FIFO_PATH);
     thread::Builder::new()
         .name("keyfifo".into())
-        .spawn(move || fifo_loop(dev, pager))
+        .spawn(fifo_loop)
         .map(|_| ())
         .unwrap_or_else(|e| warn!("Cannot spawn key FIFO thread: {}", e));
 }
 
-fn fifo_loop(mut dev: Option<File>, mut pager: Pager) {
+fn fifo_loop() {
     loop {
         // Read/write so a writer closing does not end the loop, and so key.sh
         // never blocks on open while the daemon is alive.
@@ -141,7 +165,9 @@ fn fifo_loop(mut dev: Option<File>, mut pager: Pager) {
         };
         for line in BufReader::new(fifo).lines() {
             match line {
-                Ok(l) => handle_request(&mut dev, &mut pager, l.trim()),
+                Ok(l) => {
+                    inject(&l);
+                }
                 Err(e) => {
                     warn!("{} read failed: {}", FIFO_PATH, e);
                     break;
@@ -151,22 +177,25 @@ fn fifo_loop(mut dev: Option<File>, mut pager: Pager) {
     }
 }
 
-fn handle_request(dev: &mut Option<File>, pager: &mut Pager, line: &str) {
-    match line {
-        "" => (),
-        "page_next" => pager.turn(dev.as_mut(), KEY_PAGEDOWN, KEY_DOWN),
-        "page_prev" => pager.turn(dev.as_mut(), KEY_PAGEUP, KEY_UP),
-        _ => match crate::config::parse_key(line) {
-            Some(key) => match dev {
-                Some(vkbd) => {
-                    if let Err(e) = tap(vkbd, key.code()) {
-                        warn!("Injecting {} failed: {}", line, e);
+impl Injector {
+    fn handle(&mut self, line: &str) {
+        let Injector { dev, pager } = self;
+        match line {
+            "" => (),
+            "page_next" => pager.turn(dev.as_mut(), KEY_PAGEDOWN, KEY_DOWN),
+            "page_prev" => pager.turn(dev.as_mut(), KEY_PAGEUP, KEY_UP),
+            _ => match crate::config::parse_key(line) {
+                Some(key) => match dev {
+                    Some(vkbd) => {
+                        if let Err(e) = tap(vkbd, key.code()) {
+                            warn!("Injecting {} failed: {}", line, e);
+                        }
                     }
-                }
-                None => warn!("Cannot inject {}, no uinput keyboard", line),
+                    None => warn!("Cannot inject {}, no uinput keyboard", line),
+                },
+                None => warn!("Key injection: unknown key {:?}", line),
             },
-            None => warn!("Key FIFO: unknown key {:?}", line),
-        },
+        }
     }
 }
 

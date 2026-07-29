@@ -15,11 +15,15 @@
 KOREADER_URL="http://localhost:8080/koreader/event"
 LOG_PATH="/var/log/kindle-button-mapper.log"
 
-# Send event to KOReader
+# Send event to KOReader. Exits non-zero when it did not land, which is what
+# lets auto.sh fall back to the native reader. KBM_QUIET=1 silences the warning
+# for callers that have a fallback.
 send_event() {
-    if ! curl -s --connect-timeout 1 "${KOREADER_URL}/$1" >/dev/null 2>&1; then
-        echo "$(date '+%Y-%m-%d %H:%M:%S') WARN  koreader.sh: KOReader not reachable at ${KOREADER_URL} (event '$1' dropped); KOReader may be closed, or HTTP Inspector auto-start is off." >> "$LOG_PATH" 2>/dev/null
+    if curl -s --connect-timeout 1 "${KOREADER_URL}/$1" >/dev/null 2>&1; then
+        return 0
     fi
+    [ -z "$KBM_QUIET" ] && echo "$(date '+%Y-%m-%d %H:%M:%S') WARN  koreader.sh: KOReader not reachable at ${KOREADER_URL} (event '$1' dropped); KOReader may be closed, or HTTP Inspector auto-start is off." >> "$LOG_PATH" 2>/dev/null
+    return 1
 }
 
 case "$1" in

@@ -100,6 +100,10 @@ otherwise the device `name`. Set at least one.
 
 Set `keyboard_layout` to an XKB layout code (e.g. `fr`, `de`, `ro`, `fr(oss)`) to type correctly on a non-US Bluetooth keyboard. The reader re-pins the `us` core keymap on every focus and `/usr/share/X11/xkb` is read-only, so the mapper bind-mounts a generated `us` symbols file over the system one; every re-pin then resolves to your layout, reverted when the daemon stops. Give a comma list for an Alt+Shift toggle (`us,ru`); it's a system-wide override taken from the first device that sets one. Leave it unset to keep the system default.
 
+A button fires as soon as it goes down. Give it a `longpress` mapping and it
+fires on release instead, since a short press is only a short press once you
+let go.
+
 Use `log_buttons = true` to discover button codes for your device.
 
 ### Reader actions
@@ -113,9 +117,16 @@ Three helper scripts ship with the mapper, so a binding can drive either reader:
 | Actions | `next_page`, `prev_page`, `menu`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `next_page_tap`, `prev_page_tap`, `home`, `back`, `toolbar`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `menu`, `night_mode`, `rotate`, `font_up`/`font_down`, `toggle_status_bar`, `brightness <n>`, `brightness_toggle` |
 
 `auto.sh` is what the Auto tab in MapperManager writes, and it is the one to use
-if you read in both: it checks whether KOReader is answering on its HTTP
-Inspector port and routes there, falling back to the native reader. One binding
-per button covers both readers.
+if you read in both: it sends the event to KOReader's HTTP Inspector and falls
+back to the native reader when nothing is listening there. One binding per
+button covers both readers.
+
+The daemon recognises those three scripts and runs the page-turn and reader
+events itself — a socket write, or a write to the injector it already owns —
+instead of forking a shell and a `curl` per press. A binding it does not
+recognise, including anything of your own and the `lipc` actions, still runs as
+a shell command. The scripts stay the interface, so a binding works the same
+from a terminal.
 
 Page turns are injected rather than driven by the UI, so there are no
 coordinates to get wrong.
