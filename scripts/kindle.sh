@@ -11,8 +11,9 @@
 #   brightness <n>    - Adjust frontlight (positive=up, negative=down)
 #   brightness_toggle - Toggle frontlight off/on
 #
-# Page turns go through the daemon's virtual keyboard: the native reader
-# takes KEY_DOWN as next page and KEY_UP as previous page. The rest is lipc.
+# Page turns are handed to the daemon, which injects into the physical page
+# buttons on models that have them and falls back to KEY_DOWN/KEY_UP on its
+# virtual keyboard everywhere else. The rest is lipc.
 
 DIR=$(dirname "$0")
 LOG_PATH="/var/log/kindle-button-mapper.log"
@@ -23,9 +24,7 @@ warn() {
 }
 
 send_key() {
-    if ! "$DIR/key.sh" "$1" 2>/dev/null; then
-        warn "cannot inject $1; the daemon's virtual keyboard is not running"
-    fi
+    err=$("$DIR/key.sh" "$1" 2>&1) || warn "cannot inject $1: ${err:-unknown error}"
 }
 
 fl_get() { lipc-get-prop com.lab126.powerd flIntensity 2>/dev/null || echo 0; }
@@ -34,10 +33,10 @@ fl_set() { lipc-set-prop com.lab126.powerd flIntensity "$1" 2>/dev/null; }
 
 case "$1" in
     next_page)
-        send_key KEY_DOWN
+        send_key page_next
         ;;
     prev_page)
-        send_key KEY_UP
+        send_key page_prev
         ;;
     home)
         send_key KEY_HOME

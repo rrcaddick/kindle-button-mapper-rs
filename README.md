@@ -83,17 +83,27 @@ Use `log_buttons = true` to discover button codes for your device.
 
 ### Reader actions
 
-Two helper scripts ship with the mapper, so a binding can drive either reader:
+Three helper scripts ship with the mapper, so a binding can drive either reader:
 
-| | `scripts/kindle.sh` (native reader) | `scripts/koreader.sh` (KOReader) |
-|---|---|---|
-| How it talks to the reader | virtual keyboard + `lipc` | HTTP Inspector on `localhost:8080` |
-| Setup needed | none | HTTP Inspector auto-start |
-| Actions | `next_page`, `prev_page`, `home`, `back`, `toolbar`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `menu`, `night_mode`, `rotate`, `font_up`/`font_down`, `toggle_status_bar`, `brightness <n>`, `brightness_toggle` |
+| | `scripts/auto.sh` (whatever is on screen) | `scripts/kindle.sh` (native reader) | `scripts/koreader.sh` (KOReader) |
+|---|---|---|---|
+| How it talks to the reader | picks one of the two below | virtual keyboard + `lipc` | HTTP Inspector on `localhost:8080` |
+| Setup needed | none | none | HTTP Inspector auto-start |
+| Actions | `next_page`, `prev_page`, `menu`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `home`, `back`, `toolbar`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `menu`, `night_mode`, `rotate`, `font_up`/`font_down`, `toggle_status_bar`, `brightness <n>`, `brightness_toggle` |
 
-The native reader takes `KEY_DOWN` as next page and `KEY_UP` as previous page, so
-`kindle.sh` turns pages through the daemon's own uinput keyboard — no touch
-injection and no coordinates to get wrong. Everything else goes over `lipc`.
+`auto.sh` is what the Auto tab in MapperManager writes, and it is the one to use
+if you read in both: it checks whether KOReader is answering on its HTTP
+Inspector port and routes there, falling back to the native reader. One binding
+per button covers both readers.
+
+Page turns are injected, not tapped, so there are no coordinates to get wrong.
+The daemon reads requests off `/var/run/kindle-button-mapper-key.fifo`, which is
+how `scripts/key.sh` works without any external tool, and it picks the device.
+On a model with physical page buttons the framework only turns pages for that
+node, so the daemon writes `KEY_PAGEDOWN`/`KEY_PAGEUP` straight into it and the
+reader sees a normal button press. Everywhere else the native reader takes
+`KEY_DOWN` as next page and `KEY_UP` as previous page on the virtual keyboard.
+Everything else goes over `lipc`.
 
 `keep_awake = true` (default) resets the screensaver timer on input so the device stays awake while a controller is connected, without blocking the power button.
 
@@ -148,7 +158,7 @@ Uninstall: `ssh kindle "sh /mnt/us/kindle-button-mapper/uninstall.sh"` (the scri
 - Jailbroken Kindle (Kindle 5+ / FW 5.x).
 - Linux kernel with evdev (`/dev/input/eventX`) — present on all stock Kindles.
 - An input device the Kindle can see — e.g. a Bluetooth gamepad/remote bridged via [kindle-hid-passthrough](https://github.com/zampierilucas/kindle-hid-passthrough), or any USB OTG HID device.
-- Nothing extra for the native Kindle reader — `scripts/kindle.sh` only needs the daemon running.
+- Nothing extra for the native Kindle reader — `scripts/kindle.sh` and `scripts/auto.sh` only need the daemon running.
 - **KOReader HTTP Inspector** (for KOReader integration): enable auto-start once in KOReader → *Tools → More Tools → HTTP Inspector → Auto-start HTTP server*. The default mappings in `scripts/koreader.sh` send commands to `localhost:8080`. MapperManager warns you in the KOReader action tab when this auto-start is off.
 
 ## Hardware

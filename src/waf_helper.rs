@@ -13,8 +13,17 @@ const INITCTL: &str = "/sbin/initctl";
 const SERVICE: &str = "kindle-button-mapper";
 
 // (kind, id, label) — kind matches the tab in the WAF action picker and
-// selects the script the binding is written against.
+// selects the script the binding is written against. "auto" routes at press
+// time: KOReader when it is up, the native reader otherwise.
 const ACTIONS: &[(&str, &str, &str)] = &[
+    ("auto", "next_page", "Next page"),
+    ("auto", "prev_page", "Previous page"),
+    ("auto", "menu", "Menu / toolbar"),
+    ("auto", "brightness 1", "Brightness +1"),
+    ("auto", "brightness -1", "Brightness -1"),
+    ("auto", "brightness 5", "Brightness +5"),
+    ("auto", "brightness -5", "Brightness -5"),
+    ("auto", "brightness_toggle", "Toggle frontlight"),
     ("kindle", "next_page", "Next page"),
     ("kindle", "prev_page", "Previous page"),
     ("kindle", "home", "Home screen"),

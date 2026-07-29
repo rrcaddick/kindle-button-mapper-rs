@@ -87,10 +87,11 @@ fn main() {
         signal(Signal::SIGTERM, SigHandler::Handler(handle_signal)).ok();
     }
 
-    // Virtual keyboard via uinput — kept alive for the daemon's lifetime.
-    // The path is written to /var/run/kindle-button-mapper-key-target so
-    // scripts/key.sh can inject events into it.
-    let _vkeyboard = vkeyboard::try_init();
+    // Virtual keyboard via uinput — kept alive for the daemon's lifetime by the
+    // FIFO thread, which injects the keys scripts/key.sh asks for.
+    if let Some(dev) = vkeyboard::try_init() {
+        vkeyboard::serve(dev);
+    }
 
     // System-wide XKB override, set up once. First device that names a layout wins.
     let _layout = config

@@ -236,7 +236,7 @@ fn fill_trigger_map(
     }
 }
 
-fn parse_key(s: &str) -> Option<Key> {
+pub fn parse_key(s: &str) -> Option<Key> {
     // Try parsing as decimal
     if let Ok(code) = s.parse::<u16>() {
         return Some(Key::new(code));

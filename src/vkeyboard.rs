@@ -1,26 +1,50 @@
 use log::{info, warn};
+use nix::sys::stat::Mode;
+use nix::unistd::mkfifo;
 use nix::{ioctl_none, ioctl_read_buf, ioctl_write_int};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::mem;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{self, Command};
+use std::thread;
 
 const UINPUT_DEV: &str = "/dev/uinput";
 const TARGET_FILE: &str = "/var/run/kindle-button-mapper-key-target";
+const FIFO_PATH: &str = "/var/run/kindle-button-mapper-key.fifo";
+const FIFO_OWNER: &str = "/var/run/kindle-button-mapper-key-owner";
 const SYSFS_INPUT: &str = "/sys/devices/virtual/input";
 const DEV_INPUT: &str = "/dev/input";
 const DEV_NAME: &[u8] = b"kindle-button-mapper";
+const DEV_NAME_STR: &str = "kindle-button-mapper";
 
 const UINPUT_MAX_NAME_SIZE: usize = 80;
 const ABS_CNT: usize = 64;
-const EV_KEY: u32 = 0x01;
+const EV_KEY: u16 = 0x01;
+const KEY_UP: u16 = 103;
+const KEY_PAGEUP: u16 = 104;
+const KEY_DOWN: u16 = 108;
+const KEY_PAGEDOWN: u16 = 109;
+const EV_SYN: u16 = 0x00;
+const SYN_REPORT: u16 = 0x00;
 
 ioctl_none!(ui_dev_create, b'U', 1);
 ioctl_write_int!(ui_set_evbit, b'U', 100);
 ioctl_write_int!(ui_set_keybit, b'U', 101);
 ioctl_read_buf!(ui_get_sysname, b'U', 44, u8);
+
+// Kernel layout: the timestamp is a pair of kernel longs, not libc time_t —
+// musl 1.2 widened time_t to 64 bits on 32-bit ARM, which would make this
+// struct 8 bytes too long and every write fail with EINVAL.
+#[repr(C)]
+struct InputEvent {
+    tv_sec: isize,
+    tv_usec: isize,
+    kind: u16,
+    code: u16,
+    value: i32,
+}
 
 #[repr(C)]
 struct InputId {
@@ -70,11 +94,185 @@ pub fn try_init() -> Option<File> {
     Some(file)
 }
 
+/// Serve key injection requests on a FIFO, one key name (or code) per line.
+///
+/// scripts/key.sh writes to it, so nothing on the device needs an external
+/// injector binary — evemu-event is not shipped on stock firmware.
+pub fn serve(dev: File) {
+    // A FIFO left behind by a crashed daemon would block writers forever.
+    let _ = fs::remove_file(FIFO_PATH);
+    if let Err(e) = mkfifo(FIFO_PATH, Mode::from_bits_truncate(0o600)) {
+        warn!("Cannot create {}: {} — key injection unavailable", FIFO_PATH, e);
+        return;
+    }
+    // key.sh checks this pid before writing: opening a FIFO nobody reads blocks.
+    if let Err(e) = fs::write(FIFO_OWNER, process::id().to_string()) {
+        warn!("Cannot write {}: {}", FIFO_OWNER, e);
+    }
+    info!("Key injection FIFO at {}", FIFO_PATH);
+    thread::Builder::new()
+        .name("keyfifo".into())
+        .spawn(move || fifo_loop(dev))
+        .map(|_| ())
+        .unwrap_or_else(|e| warn!("Cannot spawn key FIFO thread: {}", e));
+}
+
+fn fifo_loop(mut dev: File) {
+    let mut pager = Pager::find();
+    loop {
+        // Read/write so a writer closing does not end the loop, and so key.sh
+        // never blocks on open while the daemon is alive.
+        let fifo = match OpenOptions::new().read(true).write(true).open(FIFO_PATH) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Cannot open {}: {} — key injection stopped", FIFO_PATH, e);
+                return;
+            }
+        };
+        for line in BufReader::new(fifo).lines() {
+            match line {
+                Ok(l) => handle_request(&mut dev, &mut pager, l.trim()),
+                Err(e) => {
+                    warn!("{} read failed: {}", FIFO_PATH, e);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn handle_request(dev: &mut File, pager: &mut Pager, line: &str) {
+    match line {
+        "" => (),
+        "page_next" => pager.turn(dev, KEY_PAGEDOWN, KEY_DOWN),
+        "page_prev" => pager.turn(dev, KEY_PAGEUP, KEY_UP),
+        _ => match crate::config::parse_key(line) {
+            Some(key) => {
+                if let Err(e) = tap(dev, key.code()) {
+                    warn!("Injecting {} failed: {}", line, e);
+                }
+            }
+            None => warn!("Key FIFO: unknown key {:?}", line),
+        },
+    }
+}
+
+/// The device the reader takes page turns from.
+///
+/// Kindles with physical page buttons carry them on their own node, and the
+/// framework only turns pages for that node, ignoring page keys from any
+/// keyboard. Writing to an evdev node injects into the device itself, so a
+/// page turn goes in as if the button had been pressed. Models without the
+/// buttons take KEY_DOWN/KEY_UP on the virtual keyboard instead.
+enum Pager {
+    Buttons { path: PathBuf, node: Option<File> },
+    VirtualKeyboard,
+}
+
+impl Pager {
+    fn find() -> Self {
+        match page_button_node() {
+            Some(path) => {
+                info!("Page turns go to the page buttons at {}", path.display());
+                Pager::Buttons { path, node: None }
+            }
+            None => {
+                info!("No page buttons found, page turns go to the virtual keyboard");
+                Pager::VirtualKeyboard
+            }
+        }
+    }
+
+    fn turn(&mut self, vkbd: &mut File, button_code: u16, kbd_code: u16) {
+        match self {
+            Pager::Buttons { path, node } => {
+                if node.is_none() {
+                    match OpenOptions::new().write(true).open(&path) {
+                        Ok(f) => *node = Some(f),
+                        Err(e) => {
+                            warn!("Cannot open {}: {}", path.display(), e);
+                            return;
+                        }
+                    }
+                }
+                let f = node.as_mut().expect("opened above");
+                if let Err(e) = tap(f, button_code) {
+                    warn!("Page turn on {} failed: {}", path.display(), e);
+                    // Reopen next time, the node may have gone away.
+                    *node = None;
+                }
+            }
+            Pager::VirtualKeyboard => {
+                if let Err(e) = tap(vkbd, kbd_code) {
+                    warn!("Page turn failed: {}", e);
+                }
+            }
+        }
+    }
+}
+
+fn page_button_node() -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(DEV_INPUT)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("event"))
+        })
+        .filter(|p| evdev::Device::open(p).is_ok_and(is_page_buttons))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+fn is_page_buttons(dev: evdev::Device) -> bool {
+    if dev.name() == Some(DEV_NAME_STR) {
+        return false;
+    }
+    // Built into the device, so a paired keyboard or gamepad that happens to
+    // carry page keys is never mistaken for the reader's own buttons.
+    if dev.input_id().bus_type() != evdev::BusType::BUS_HOST {
+        return false;
+    }
+    dev.supported_keys().is_some_and(|k| {
+        k.contains(evdev::Key::KEY_PAGEUP)
+            && k.contains(evdev::Key::KEY_PAGEDOWN)
+            && !k.contains(evdev::Key::KEY_A)
+    })
+}
+
+fn tap(dev: &mut File, code: u16) -> io::Result<()> {
+    write_event(dev, EV_KEY, code, 1)?;
+    write_event(dev, EV_SYN, SYN_REPORT, 0)?;
+    write_event(dev, EV_KEY, code, 0)?;
+    write_event(dev, EV_SYN, SYN_REPORT, 0)
+}
+
+fn write_event(dev: &mut File, kind: u16, code: u16, value: i32) -> io::Result<()> {
+    // The kernel stamps the time itself, so leaving it zero is fine.
+    let ev = InputEvent {
+        tv_sec: 0,
+        tv_usec: 0,
+        kind,
+        code,
+        value,
+    };
+    let bytes = unsafe {
+        std::slice::from_raw_parts(
+            (&ev as *const InputEvent).cast::<u8>(),
+            mem::size_of::<InputEvent>(),
+        )
+    };
+    dev.write_all(bytes)
+}
+
 fn create_device() -> io::Result<File> {
     let file = OpenOptions::new().read(true).write(true).open(UINPUT_DEV)?;
     let fd = file.as_raw_fd();
 
-    unsafe { ui_set_evbit(fd, EV_KEY as _) }?;
+    unsafe { ui_set_evbit(fd, EV_KEY as u32 as _) }?;
     for code in supported_keys() {
         unsafe { ui_set_keybit(fd, code as _) }?;
     }
@@ -164,7 +362,9 @@ fn ensure_event_node(path: &Path, sysdir: &Path) -> io::Result<()> {
     let status = Command::new("mknod")
         .args([&path.display().to_string(), "c", major, minor])
         .status()?;
-    if !status.success() {
+    // devtmpfs can beat us to the node between the check above and here, and
+    // that mknod failure is not one worth losing the keyboard over.
+    if !status.success() && !path.exists() {
         return Err(io::Error::other(format!(
             "mknod {} exit {}",
             path.display(),
