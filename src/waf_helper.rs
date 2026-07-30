@@ -26,6 +26,8 @@ const ACTIONS: &[(&str, &str, &str)] = &[
     ("auto", "brightness_toggle", "Toggle frontlight"),
     ("kindle", "next_page", "Next page"),
     ("kindle", "prev_page", "Previous page"),
+    ("kindle", "next_page_tap", "Next page (tap)"),
+    ("kindle", "prev_page_tap", "Previous page (tap)"),
     ("kindle", "home", "Home screen"),
     ("kindle", "back", "Back"),
     ("kindle", "toolbar", "Toggle toolbar"),

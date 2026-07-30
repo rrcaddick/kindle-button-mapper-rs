@@ -5,6 +5,8 @@
 # Commands:
 #   next_page         - Turn to next page
 #   prev_page         - Turn to previous page
+#   next_page_tap     - Turn to next page by tapping the screen
+#   prev_page_tap     - Turn to previous page by tapping the screen
 #   home              - Go to the home screen
 #   back              - Back / close the current view
 #   toolbar           - Toggle the reader toolbar
@@ -13,7 +15,8 @@
 #
 # Page turns are handed to the daemon, which injects into the physical page
 # buttons on models that have them and falls back to KEY_DOWN/KEY_UP on its
-# virtual keyboard everywhere else. The rest is lipc.
+# virtual keyboard everywhere else. The tap variants are for readers that
+# ignore keys entirely, and go through tap.sh. The rest is lipc.
 
 DIR=$(dirname "$0")
 LOG_PATH="/var/log/kindle-button-mapper.log"
@@ -37,6 +40,12 @@ case "$1" in
         ;;
     prev_page)
         send_key page_prev
+        ;;
+    next_page_tap)
+        "$DIR/tap.sh" 85 50 || warn "next_page_tap: cannot tap the screen"
+        ;;
+    prev_page_tap)
+        "$DIR/tap.sh" 12 50 || warn "prev_page_tap: cannot tap the screen"
         ;;
     home)
         send_key KEY_HOME
@@ -76,7 +85,8 @@ case "$1" in
         ;;
     *)
         echo "Usage: $0 <command> [args...]"
-        echo "Commands: next_page, prev_page, home, back, toolbar,"
+        echo "Commands: next_page, prev_page, next_page_tap, prev_page_tap,"
+        echo "          home, back, toolbar,"
         echo "          brightness <n>, brightness_toggle"
         exit 1
         ;;
