@@ -23,14 +23,31 @@ fi
 
 mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/illusion/MapperManager" "$INSTALL_DIR/assets"
 
-cp "$BIN" "$INSTALL_DIR/kindle-button-mapper"
-cp "$SRC_DIR/assets/kindle-button-mapper.upstart" "$INSTALL_DIR/assets/"
-cp "$SRC_DIR/uninstall.sh" "$INSTALL_DIR/"
-[ -f "$INSTALL_DIR/config.ini" ] || cp "$SRC_DIR/config.ini" "$INSTALL_DIR/"
-cp "$SRC_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/"
+# The tree may already have been copied straight into INSTALL_DIR; only copy
+# what isn't already in place (busybox cp aborts on same-file copies).
+# Probe with a sentinel instead of comparing path strings, since /mnt/us is
+# case-insensitive vfat and also reachable via the /mnt/base-us alias mount.
+SAME_DIR=0
+SENTINEL=".kbm-install-probe.$$"
+if : > "$INSTALL_DIR/$SENTINEL" 2>/dev/null; then
+    [ -e "$SRC_DIR/$SENTINEL" ] && SAME_DIR=1
+    rm -f "$INSTALL_DIR/$SENTINEL"
+fi
+
+if [ "$SAME_DIR" = 1 ] && [ "$BIN" = "$SRC_DIR/kindle-button-mapper" ]; then
+    : # binary already sits at its destination
+else
+    cp "$BIN" "$INSTALL_DIR/kindle-button-mapper"
+fi
+if [ "$SAME_DIR" != 1 ]; then
+    cp "$SRC_DIR/assets/kindle-button-mapper.upstart" "$INSTALL_DIR/assets/"
+    cp "$SRC_DIR/uninstall.sh" "$INSTALL_DIR/"
+    [ -f "$INSTALL_DIR/config.ini" ] || cp "$SRC_DIR/config.ini" "$INSTALL_DIR/"
+    cp "$SRC_DIR/scripts/"*.sh "$INSTALL_DIR/scripts/"
+    cp "$SRC_DIR/illusion/MapperManager.sh" "$SRC_DIR/illusion/install-waf-app.sh" "$INSTALL_DIR/illusion/"
+    cp "$SRC_DIR/illusion/MapperManager/"* "$INSTALL_DIR/illusion/MapperManager/"
+fi
 rm -f "$INSTALL_DIR/scripts/start-inhib.sh" "$INSTALL_DIR/scripts/stop-inhib.sh"
-cp "$SRC_DIR/illusion/MapperManager.sh" "$SRC_DIR/illusion/install-waf-app.sh" "$INSTALL_DIR/illusion/"
-cp "$SRC_DIR/illusion/MapperManager/"* "$INSTALL_DIR/illusion/MapperManager/"
 
 chmod +x "$INSTALL_DIR/kindle-button-mapper" \
          "$INSTALL_DIR/uninstall.sh" \
