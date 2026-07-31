@@ -98,7 +98,18 @@ pub fn try_init() -> Option<File> {
 ///
 /// scripts/key.sh writes to it, so nothing on the device needs an external
 /// injector binary — evemu-event is not shipped on stock firmware.
-pub fn serve(dev: File) {
+///
+/// `dev` is the uinput keyboard, which is absent on firmware without the
+/// driver. Page turns still go in through the page buttons there, so the FIFO
+/// is only pointless when neither exists, and it stays unopened in that case so
+/// key.sh fails and scripts/kindle.sh can fall back to a tap.
+pub fn serve(dev: Option<File>) {
+    let pager = Pager::find();
+    if dev.is_none() && matches!(pager, Pager::VirtualKeyboard) {
+        warn!("No page buttons and no uinput keyboard — nothing to inject into, use the tap page turn actions");
+        return;
+    }
+
     // A FIFO left behind by a crashed daemon would block writers forever.
     let _ = fs::remove_file(FIFO_PATH);
     if let Err(e) = mkfifo(FIFO_PATH, Mode::from_bits_truncate(0o600)) {
@@ -112,13 +123,12 @@ pub fn serve(dev: File) {
     info!("Key injection FIFO at {}", FIFO_PATH);
     thread::Builder::new()
         .name("keyfifo".into())
-        .spawn(move || fifo_loop(dev))
+        .spawn(move || fifo_loop(dev, pager))
         .map(|_| ())
         .unwrap_or_else(|e| warn!("Cannot spawn key FIFO thread: {}", e));
 }
 
-fn fifo_loop(mut dev: File) {
-    let mut pager = Pager::find();
+fn fifo_loop(mut dev: Option<File>, mut pager: Pager) {
     loop {
         // Read/write so a writer closing does not end the loop, and so key.sh
         // never blocks on open while the daemon is alive.
@@ -141,17 +151,20 @@ fn fifo_loop(mut dev: File) {
     }
 }
 
-fn handle_request(dev: &mut File, pager: &mut Pager, line: &str) {
+fn handle_request(dev: &mut Option<File>, pager: &mut Pager, line: &str) {
     match line {
         "" => (),
-        "page_next" => pager.turn(dev, KEY_PAGEDOWN, KEY_DOWN),
-        "page_prev" => pager.turn(dev, KEY_PAGEUP, KEY_UP),
+        "page_next" => pager.turn(dev.as_mut(), KEY_PAGEDOWN, KEY_DOWN),
+        "page_prev" => pager.turn(dev.as_mut(), KEY_PAGEUP, KEY_UP),
         _ => match crate::config::parse_key(line) {
-            Some(key) => {
-                if let Err(e) = tap(dev, key.code()) {
-                    warn!("Injecting {} failed: {}", line, e);
+            Some(key) => match dev {
+                Some(vkbd) => {
+                    if let Err(e) = tap(vkbd, key.code()) {
+                        warn!("Injecting {} failed: {}", line, e);
+                    }
                 }
-            }
+                None => warn!("Cannot inject {}, no uinput keyboard", line),
+            },
             None => warn!("Key FIFO: unknown key {:?}", line),
         },
     }
@@ -183,7 +196,7 @@ impl Pager {
         }
     }
 
-    fn turn(&mut self, vkbd: &mut File, button_code: u16, kbd_code: u16) {
+    fn turn(&mut self, vkbd: Option<&mut File>, button_code: u16, kbd_code: u16) {
         match self {
             Pager::Buttons { path, node } => {
                 if node.is_none() {
@@ -202,11 +215,15 @@ impl Pager {
                     *node = None;
                 }
             }
-            Pager::VirtualKeyboard => {
-                if let Err(e) = tap(vkbd, kbd_code) {
-                    warn!("Page turn failed: {}", e);
+            Pager::VirtualKeyboard => match vkbd {
+                Some(vkbd) => {
+                    if let Err(e) = tap(vkbd, kbd_code) {
+                        warn!("Page turn failed: {}", e);
+                    }
                 }
-            }
+                // serve() does not open the FIFO in this case.
+                None => warn!("Page turn failed, no uinput keyboard"),
+            },
         }
     }
 }
