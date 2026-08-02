@@ -1,8 +1,8 @@
+use crate::action;
 use crate::config::{DeviceConfig, DpadDirection, Trigger};
 use evdev::Key;
 use log::{debug, info};
 use std::collections::HashMap;
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 pub struct Mapper {
@@ -19,6 +19,7 @@ pub struct Mapper {
     last_press: HashMap<Key, Instant>,
     press_start: HashMap<Key, Instant>,
     long_press_fired: HashMap<Key, bool>,
+    fired_on_press: HashMap<Key, bool>,
     last_repeat: HashMap<Key, Instant>,
     last_dpad: HashMap<DpadDirection, Instant>,
     last_trigger: HashMap<Trigger, Instant>,
@@ -55,6 +56,7 @@ impl Mapper {
             last_press: HashMap::new(),
             press_start: HashMap::new(),
             long_press_fired: HashMap::new(),
+            fired_on_press: HashMap::new(),
             last_repeat: HashMap::new(),
             last_dpad: HashMap::new(),
             last_trigger: HashMap::new(),
@@ -80,6 +82,23 @@ impl Mapper {
         self.last_press.insert(key, Instant::now());
         self.press_start.insert(key, Instant::now());
         self.long_press_fired.insert(key, false);
+
+        // Fire on the way down. A key with a long press mapping has to wait for
+        // the release to tell the two apart.
+        if self.long_press_mappings.contains_key(&key) {
+            return;
+        }
+        if let Some(script) = self.mappings.get(&key) {
+            if self.log_buttons {
+                info!("Button: {:?} (code: {}) -> {}", key, key.code(), script);
+            }
+            execute_script(script);
+            self.fired_on_press.insert(key, true);
+            self.last_repeat.insert(key, Instant::now());
+        } else if self.log_buttons {
+            // Log unmapped buttons for debugging
+            info!("Button: {:?} (code: {}) [unmapped]", key, key.code());
+        }
     }
 
     pub fn handle_held(&mut self, key: Key) {
@@ -131,7 +150,13 @@ impl Mapper {
         // must not fire the action either.
         let had_press = self.press_start.remove(&key).is_some();
         let long_press_fired = self.long_press_fired.remove(&key).unwrap_or(false);
+        let fired_on_press = self.fired_on_press.remove(&key).unwrap_or(false);
         self.last_repeat.remove(&key);
+
+        if fired_on_press {
+            debug!("Skipping release for {:?} (already fired on press)", key);
+            return;
+        }
 
         if !had_press {
             debug!("Skipping release for {:?} (press was debounced)", key);
@@ -349,16 +374,5 @@ impl Mapper {
 }
 
 fn execute_script(script: &str) {
-    // Always use shell to handle arguments properly
-    match Command::new("/bin/sh").args(["-c", script]).spawn() {
-        Ok(mut child) => {
-            // Spawn thread to wait for child to avoid zombies
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(e) => {
-            log::error!("Failed to execute '{}': {}", script, e);
-        }
-    }
+    action::run(script);
 }
