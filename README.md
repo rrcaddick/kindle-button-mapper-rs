@@ -110,20 +110,30 @@ Three helper scripts ship with the mapper, so a binding can drive either reader:
 |---|---|---|---|
 | How it talks to the reader | picks one of the two below | virtual keyboard + `lipc` | HTTP Inspector on `localhost:8080` |
 | Setup needed | none | none | HTTP Inspector auto-start |
-| Actions | `next_page`, `prev_page`, `menu`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `home`, `back`, `toolbar`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `menu`, `night_mode`, `rotate`, `font_up`/`font_down`, `toggle_status_bar`, `brightness <n>`, `brightness_toggle` |
+| Actions | `next_page`, `prev_page`, `menu`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `next_page_tap`, `prev_page_tap`, `home`, `back`, `toolbar`, `brightness <n>`, `brightness_toggle` | `next_page`, `prev_page`, `menu`, `night_mode`, `rotate`, `font_up`/`font_down`, `toggle_status_bar`, `brightness <n>`, `brightness_toggle` |
 
 `auto.sh` is what the Auto tab in MapperManager writes, and it is the one to use
 if you read in both: it checks whether KOReader is answering on its HTTP
 Inspector port and routes there, falling back to the native reader. One binding
 per button covers both readers.
 
-Page turns are injected, not tapped, so there are no coordinates to get wrong.
+Page turns are injected rather than driven by the UI, so there are no
+coordinates to get wrong.
 The daemon reads requests off `/var/run/kindle-button-mapper-key.fifo`, which is
 how `scripts/key.sh` works without any external tool, and it picks the device.
 On a model with physical page buttons the framework only turns pages for that
 node, so the daemon writes `KEY_PAGEDOWN`/`KEY_PAGEUP` straight into it and the
 reader sees a normal button press. Everywhere else the native reader takes
 `KEY_DOWN` as next page and `KEY_UP` as previous page on the virtual keyboard.
+
+Some firmware ignores injected keys altogether, so `next_page_tap` and
+`prev_page_tap` go in as a touch on the screen instead, near the right and left
+edges. That one runs entirely in `scripts/tap.sh`, which finds the panel in
+`/proc/bus/input/devices`, takes the screen size from the framebuffer and
+writes the events itself, no daemon involved. Only reach for these if the plain
+page turn does nothing, since a tap follows whatever tap zones you have set in
+the reader.
+
 Everything else goes over `lipc`.
 
 `keep_awake = true` (default) resets the screensaver timer on input so the device stays awake while a controller is connected, without blocking the power button.

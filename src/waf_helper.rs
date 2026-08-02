@@ -18,6 +18,8 @@ const SERVICE: &str = "kindle-button-mapper";
 const ACTIONS: &[(&str, &str, &str)] = &[
     ("auto", "next_page", "Next page"),
     ("auto", "prev_page", "Previous page"),
+    ("auto", "next_page_tap", "Next page (tap)"),
+    ("auto", "prev_page_tap", "Previous page (tap)"),
     ("auto", "menu", "Menu / toolbar"),
     ("auto", "brightness 1", "Brightness +1"),
     ("auto", "brightness -1", "Brightness -1"),
@@ -26,6 +28,8 @@ const ACTIONS: &[(&str, &str, &str)] = &[
     ("auto", "brightness_toggle", "Toggle frontlight"),
     ("kindle", "next_page", "Next page"),
     ("kindle", "prev_page", "Previous page"),
+    ("kindle", "next_page_tap", "Next page (tap)"),
+    ("kindle", "prev_page_tap", "Previous page (tap)"),
     ("kindle", "home", "Home screen"),
     ("kindle", "back", "Back"),
     ("kindle", "toolbar", "Toggle toolbar"),

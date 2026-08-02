@@ -5,6 +5,8 @@
 # Commands:
 #   next_page         - Turn to next page
 #   prev_page         - Turn to previous page
+#   next_page_tap     - Turn to next page by tapping the screen
+#   prev_page_tap     - Turn to previous page by tapping the screen
 #   home              - Go to the home screen
 #   back              - Back / close the current view
 #   toolbar           - Toggle the reader toolbar
@@ -13,7 +15,10 @@
 #
 # Page turns are handed to the daemon, which injects into the physical page
 # buttons on models that have them and falls back to KEY_DOWN/KEY_UP on its
-# virtual keyboard everywhere else. The rest is lipc.
+# virtual keyboard everywhere else. Where there is no key path at all, they tap
+# instead. The tap variants force that for readers that take the keys but
+# ignore them, which nothing here can tell apart from a key that worked. Both
+# go through tap.sh. The rest is lipc.
 
 DIR=$(dirname "$0")
 LOG_PATH="/var/log/kindle-button-mapper.log"
@@ -24,7 +29,21 @@ warn() {
 }
 
 send_key() {
-    err=$("$DIR/key.sh" "$1" 2>&1) || warn "cannot inject $1: ${err:-unknown error}"
+    err=$("$DIR/key.sh" "$1" 2>&1) && return 0
+    warn "cannot inject $1: ${err:-unknown error}"
+    return 1
+}
+
+# Quiet, since the caller falls back to a tap and a device with no key path at
+# all would otherwise log a line on every page turn. The daemon already says
+# why once at startup.
+try_key() {
+    "$DIR/key.sh" "$1" >/dev/null 2>&1
+}
+
+# Right edge for next, left edge for previous, both at mid height.
+tap_page() {
+    "$DIR/tap.sh" "$2" 50 || warn "$1: cannot tap the screen"
 }
 
 fl_get() { lipc-get-prop com.lab126.powerd flIntensity 2>/dev/null || echo 0; }
@@ -33,10 +52,16 @@ fl_set() { lipc-set-prop com.lab126.powerd flIntensity "$1" 2>/dev/null; }
 
 case "$1" in
     next_page)
-        send_key page_next
+        try_key page_next || tap_page next_page 85
         ;;
     prev_page)
-        send_key page_prev
+        try_key page_prev || tap_page prev_page 12
+        ;;
+    next_page_tap)
+        tap_page next_page_tap 85
+        ;;
+    prev_page_tap)
+        tap_page prev_page_tap 12
         ;;
     home)
         send_key KEY_HOME
@@ -76,7 +101,8 @@ case "$1" in
         ;;
     *)
         echo "Usage: $0 <command> [args...]"
-        echo "Commands: next_page, prev_page, home, back, toolbar,"
+        echo "Commands: next_page, prev_page, next_page_tap, prev_page_tap,"
+        echo "          home, back, toolbar,"
         echo "          brightness <n>, brightness_toggle"
         exit 1
         ;;

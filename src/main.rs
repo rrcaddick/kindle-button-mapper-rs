@@ -88,10 +88,10 @@ fn main() {
     }
 
     // Virtual keyboard via uinput — kept alive for the daemon's lifetime by the
-    // FIFO thread, which injects the keys scripts/key.sh asks for.
-    if let Some(dev) = vkeyboard::try_init() {
-        vkeyboard::serve(dev);
-    }
+    // FIFO thread, which injects the keys scripts/key.sh asks for. Page turns
+    // on a model with page buttons go into that node instead, so the FIFO is
+    // worth serving even where uinput is missing.
+    vkeyboard::serve(vkeyboard::try_init());
 
     // System-wide XKB override, set up once. First device that names a layout wins.
     let _layout = config
