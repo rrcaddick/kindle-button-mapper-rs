@@ -8,8 +8,8 @@ use std::thread;
 /// Steps run in order until one lands, which is how `auto.sh` picks a reader.
 #[derive(Debug, PartialEq)]
 enum Step {
-    Koreader(String),   // HTTP Inspector event path, e.g. GotoViewRel/1
-    Key(&'static str),  // injection request, e.g. page_next
+    Koreader(String), // HTTP Inspector event path, e.g. GotoViewRel/1
+    Key(String),      // injection request, e.g. page_next or KEY_LEFT
 }
 
 /// Run a configured action. The shipped reader scripts are handled in-process —
@@ -94,12 +94,24 @@ fn plan(script: &str) -> Option<Vec<Step>> {
 
     match name {
         "koreader.sh" => Some(vec![Step::Koreader(koreader_event(cmd)?.to_string())]),
-        "kindle.sh" => Some(vec![Step::Key(native_key(cmd)?)]),
+        "kindle.sh" => Some(vec![Step::Key(native_key(cmd)?.to_string())]),
+        // The FIFO round trip key.sh does ends in the same inject() call, so
+        // the shell only ever cost a fork. Held keys go through here.
+        "key.sh" => Some(vec![Step::Key(injectable(cmd)?)]),
         "auto.sh" => Some(vec![
             Step::Koreader(koreader_event(cmd)?.to_string()),
-            Step::Key(native_key(cmd)?),
+            Step::Key(native_key(cmd)?.to_string()),
         ]),
         _ => None,
+    }
+}
+
+/// Only what the injector itself accepts, so an unknown name still reaches
+/// key.sh and its evemu fallback rather than being dropped in-process.
+fn injectable(cmd: &str) -> Option<String> {
+    match cmd {
+        "page_next" | "page_prev" => Some(cmd.to_string()),
+        _ => crate::config::parse_key(cmd).map(|_| cmd.to_string()),
     }
 }
 
@@ -133,7 +145,7 @@ mod tests {
     fn page_turns_are_planned() {
         assert_eq!(
             plan("/mnt/us/kindle-button-mapper/scripts/kindle.sh next_page"),
-            Some(vec![Step::Key("page_next")])
+            Some(vec![Step::Key("page_next".into())])
         );
         assert_eq!(
             plan("scripts/koreader.sh prev_page"),
@@ -143,9 +155,32 @@ mod tests {
             plan("/mnt/us/kindle-button-mapper/scripts/auto.sh next_page"),
             Some(vec![
                 Step::Koreader("GotoViewRel/1".into()),
-                Step::Key("page_next"),
+                Step::Key("page_next".into()),
             ])
         );
+    }
+
+    #[test]
+    fn key_injection_is_planned() {
+        assert_eq!(
+            plan("/mnt/us/kindle-button-mapper/scripts/key.sh KEY_LEFT"),
+            Some(vec![Step::Key("KEY_LEFT".into())])
+        );
+        // Lowercase and bare codes are what parse_key takes, so they plan too.
+        assert_eq!(
+            plan("scripts/key.sh key_enter"),
+            Some(vec![Step::Key("key_enter".into())])
+        );
+        assert_eq!(
+            plan("scripts/key.sh 105"),
+            Some(vec![Step::Key("105".into())])
+        );
+        assert_eq!(
+            plan("scripts/key.sh page_next"),
+            Some(vec![Step::Key("page_next".into())])
+        );
+        // Unknown names stay a shell call so key.sh can still try evemu.
+        assert_eq!(plan("scripts/key.sh NOT_A_KEY"), None);
     }
 
     #[test]
