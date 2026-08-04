@@ -9,6 +9,14 @@ use std::time::Duration;
 
 const INPUT_DIR: &str = "/dev/input";
 
+/// A Bluetooth node's uniq carries the address type as a suffix
+/// ("E0:F6:B5:BC:1C:7F/P"), but configs hold the bare MAC in whatever case
+/// the user typed. Compare only the address part, case-insensitively.
+pub fn uniq_matches(node: &str, want: &str) -> bool {
+    let bare = |s: &str| s.split('/').next().unwrap_or("").to_ascii_uppercase();
+    !want.is_empty() && bare(node) == bare(want)
+}
+
 pub struct InputHandler {
     device_name: Option<String>,
     device_uniq: Option<String>,
@@ -52,7 +60,7 @@ impl InputHandler {
         // alone when set, so the device name is just a label.
         if let Some(ref uniq) = self.device_uniq {
             if !uniq.is_empty() {
-                return dev.unique_name().unwrap_or("") == uniq.as_str();
+                return uniq_matches(dev.unique_name().unwrap_or(""), uniq);
             }
         }
         if let Some(ref name) = self.device_name {
@@ -149,5 +157,20 @@ impl InputHandler {
             device.name().unwrap_or("?"),
             device.unique_name().unwrap_or(""));
         Ok(device)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::uniq_matches;
+
+    #[test]
+    fn uniq_ignores_suffix_and_case() {
+        assert!(uniq_matches("E0:F6:B5:BC:1C:7F/P", "E0:F6:B5:BC:1C:7F"));
+        assert!(uniq_matches("E0:F6:B5:BC:1C:7F/P", "e0:f6:b5:bc:1c:7f"));
+        assert!(uniq_matches("E0:F6:B5:BC:1C:7F", "E0:F6:B5:BC:1C:7F/P"));
+        assert!(!uniq_matches("E0:F6:B5:BC:1C:7F/P", "AA:BB:CC:DD:EE:FF"));
+        assert!(!uniq_matches("", "AA:BB:CC:DD:EE:FF"));
+        assert!(!uniq_matches("E0:F6:B5:BC:1C:7F/P", ""));
     }
 }
