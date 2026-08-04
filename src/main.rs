@@ -145,7 +145,7 @@ struct WorkerSettings {
     on_disconnect: Option<String>,
 }
 
-fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings) {
+fn device_worker(mut cfg: config::DeviceConfig, settings: WorkerSettings) {
     let mut mapper = Mapper::new(
         &cfg,
         settings.debounce_ms,
@@ -153,11 +153,41 @@ fn device_worker(cfg: config::DeviceConfig, settings: WorkerSettings) {
         settings.repeat_ms,
         settings.log_buttons,
     );
+    let mut checked_defaults = false;
 
     loop {
         let handler = InputHandler::new(cfg.name.clone(), cfg.uniq.clone(), cfg.grab);
         match handler.open() {
             Ok(mut device) => {
+                // An unmapped device only gets the default gamepad layout if
+                // the node says it is one; the config alone can't tell a pad
+                // from a keyboard, and grabbing an unmapped keyboard would
+                // kill it for the whole system.
+                if !checked_defaults && cfg.is_unmapped() {
+                    checked_defaults = true;
+                    if is_gamepad(&device) {
+                        cfg.apply_default_layout();
+                        mapper = Mapper::new(
+                            &cfg,
+                            settings.debounce_ms,
+                            settings.long_press_ms,
+                            settings.repeat_ms,
+                            settings.log_buttons,
+                        );
+                    } else if cfg.keyboard_layout.is_none() {
+                        info!(
+                            "[{}] no mappings and not a gamepad — leaving it alone until something is mapped",
+                            cfg.id
+                        );
+                        // Dropping the device releases the grab. Park rather
+                        // than return: a worker exiting would let main finish
+                        // and upstart cycle the daemon.
+                        drop(device);
+                        loop {
+                            thread::sleep(Duration::from_secs(3600));
+                        }
+                    }
+                }
                 info!("[{}] device connected", cfg.id);
                 if let Some(ref script) = settings.on_connect {
                     info!("[{}] running on_connect script", cfg.id);
@@ -270,6 +300,14 @@ fn run_event_loop(device: &mut evdev::Device, mapper: &mut Mapper, grab: bool, k
             }
         }
     }
+}
+
+fn is_gamepad(dev: &evdev::Device) -> bool {
+    dev.supported_keys()
+        .is_some_and(|k| k.contains(evdev::Key::BTN_SOUTH))
+        || dev
+            .supported_absolute_axes()
+            .is_some_and(|a| a.contains(evdev::AbsoluteAxisType::ABS_HAT0X))
 }
 
 fn set_nonblocking(fd: std::os::unix::io::RawFd) {
