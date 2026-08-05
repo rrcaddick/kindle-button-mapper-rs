@@ -88,8 +88,19 @@ fn plan(script: &str) -> Option<Vec<Step>> {
     let path = words.next()?;
     let name = path.rsplit('/').next()?;
     let cmd = words.next()?;
+    let arg = words.next();
     if words.next().is_some() {
-        return None; // takes an argument (brightness, font size) — not a hot path
+        return None; // more than one argument is never a hot path
+    }
+
+    // `koreader.sh event <Name>` is any Dispatcher action the plugin offers,
+    // so it is the common case rather than an exotic one. Everything else
+    // taking an argument (brightness, font size) stays a shell call.
+    if let Some(arg) = arg {
+        if name == "koreader.sh" && cmd == "event" && is_event_name(arg) {
+            return Some(vec![Step::Koreader(arg.to_string())]);
+        }
+        return None;
     }
 
     match name {
@@ -104,6 +115,14 @@ fn plan(script: &str) -> Option<Vec<Step>> {
         ]),
         _ => None,
     }
+}
+
+/// A bare KOReader event name. Anything with a slash already carries its own
+/// argument and is left to the shell, which url-encodes it.
+fn is_event_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_alphabetic())
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Only what the injector itself accepts, so an unknown name still reaches
@@ -181,6 +200,27 @@ mod tests {
         );
         // Unknown names stay a shell call so key.sh can still try evemu.
         assert_eq!(plan("scripts/key.sh NOT_A_KEY"), None);
+    }
+
+    #[test]
+    fn koreader_events_are_planned() {
+        assert_eq!(
+            plan("/mnt/us/kindle-button-mapper/scripts/koreader.sh event ShowMenu"),
+            Some(vec![Step::Koreader("ShowMenu".into())])
+        );
+        assert_eq!(
+            plan("scripts/koreader.sh event ToggleNightMode"),
+            Some(vec![Step::Koreader("ToggleNightMode".into())])
+        );
+        // Already carries an argument, the shell url-encodes it.
+        assert_eq!(plan("scripts/koreader.sh event GotoViewRel/1"), None);
+        // Two arguments is never a hot path.
+        assert_eq!(plan("scripts/koreader.sh event Foo Bar"), None);
+        // The named shortcuts still work and win over the generic form.
+        assert_eq!(
+            plan("scripts/koreader.sh next_page"),
+            Some(vec![Step::Koreader("GotoViewRel/1".into())])
+        );
     }
 
     #[test]
