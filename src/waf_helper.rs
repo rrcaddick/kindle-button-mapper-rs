@@ -4,6 +4,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
+use nix::sys::signal::{kill, Signal};
+use nix::unistd::Pid;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -488,7 +490,26 @@ fn run_initctl(action: &str) -> (u16, String) {
     }
 }
 
+/// SIGHUP rather than a restart: restarting drops the uinput keyboard, and
+/// anything holding that node open (KOReader) sees its input device vanish and
+/// rebuilds its UI, throwing the user out of the menu they were editing from.
+/// Falls back to a restart for a daemon too old to handle the signal.
 fn reload_daemon() -> (u16, String) {
+    let (running, pid) = daemon_status();
+    if running && pid > 0 {
+        let target = Pid::from_raw(pid as i32);
+        match kill(target, Signal::SIGHUP) {
+            Ok(()) => {
+                info!("Asked the daemon to reload its config in place");
+                return (200, json_ok());
+            }
+            Err(e) => warn!("SIGHUP to {} failed: {}, restarting instead", pid, e),
+        }
+    }
+    restart_daemon()
+}
+
+fn restart_daemon() -> (u16, String) {
     run_initctl("restart")
 }
 

@@ -5,6 +5,7 @@ mod koreader;
 mod layout;
 mod mapper;
 mod pause;
+mod reload;
 mod vkeyboard;
 mod waf_helper;
 
@@ -87,6 +88,21 @@ fn main() {
     unsafe {
         signal(Signal::SIGINT, SigHandler::Handler(handle_signal)).ok();
         signal(Signal::SIGTERM, SigHandler::Handler(handle_signal)).ok();
+        // The WAF helper sends this instead of restarting us, so the uinput
+        // keyboard survives a mapping edit.
+        signal(Signal::SIGHUP, SigHandler::Handler(reload::handle_sighup)).ok();
+    }
+
+    reload::publish(&config);
+    {
+        let path = config_path.to_string();
+        thread::Builder::new()
+            .name("reload".into())
+            .spawn(move || loop {
+                reload::poll(&path);
+                thread::sleep(Duration::from_millis(200));
+            })
+            .expect("spawn reload thread");
     }
 
     // Virtual keyboard via uinput — kept alive for the daemon's lifetime by the
@@ -154,6 +170,7 @@ fn device_worker(mut cfg: config::DeviceConfig, settings: WorkerSettings) {
         settings.log_buttons,
     );
     let mut checked_defaults = false;
+    let mut generation = reload::generation();
 
     loop {
         let handler = InputHandler::new(cfg.name.clone(), cfg.uniq.clone(), cfg.grab);
@@ -193,7 +210,8 @@ fn device_worker(mut cfg: config::DeviceConfig, settings: WorkerSettings) {
                     info!("[{}] running on_connect script", cfg.id);
                     execute_script(script);
                 }
-                if let Err(e) = run_event_loop(&mut device, &mut mapper, cfg.grab, settings.keep_awake) {
+                if let Err(e) = run_event_loop(&mut device, &mut mapper, cfg.grab,
+                    settings.keep_awake, &cfg, &mut generation, &settings) {
                     error!("[{}] event loop error: {}", cfg.id, e);
                     if let Some(ref script) = settings.on_disconnect {
                         info!("[{}] device disconnected, running on_disconnect script", cfg.id);
@@ -210,7 +228,15 @@ fn device_worker(mut cfg: config::DeviceConfig, settings: WorkerSettings) {
     }
 }
 
-fn run_event_loop(device: &mut evdev::Device, mapper: &mut Mapper, grab: bool, keep_awake: bool) -> Result<(), String> {
+fn run_event_loop(
+    device: &mut evdev::Device,
+    mapper: &mut Mapper,
+    grab: bool,
+    keep_awake: bool,
+    cfg: &config::DeviceConfig,
+    generation: &mut u64,
+    settings: &WorkerSettings,
+) -> Result<(), String> {
     // Non-blocking + poll so we can notice a capture pause while idle.
     set_nonblocking(device.as_raw_fd());
     let mut grabbed = grab;
@@ -223,6 +249,21 @@ fn run_event_loop(device: &mut evdev::Device, mapper: &mut Mapper, grab: bool, k
     };
 
     loop {
+        let current = reload::generation();
+        if current != *generation {
+            *generation = current;
+            if let Some(fresh) = reload::device_config(&cfg.id) {
+                info!("[{}] applying reloaded mappings", cfg.id);
+                *mapper = Mapper::new(
+                    &fresh,
+                    settings.debounce_ms,
+                    settings.long_press_ms,
+                    settings.repeat_ms,
+                    settings.log_buttons,
+                );
+            }
+        }
+
         // Release the grab while capture is paused, restore it after.
         let paused = pause::active();
         if paused && grabbed {
