@@ -8,6 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 const INPUT_DIR: &str = "/dev/input";
+const SETTLE_ATTEMPTS: u32 = 20;
+const SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 
 /// A Bluetooth node's uniq carries the address type as a suffix
 /// ("E0:F6:B5:BC:1C:7F/P"), but configs hold the bare MAC in whatever case
@@ -116,28 +118,27 @@ impl InputHandler {
             let events = inotify.read_events()
                 .map_err(|e| format!("inotify read failed: {}", e))?;
 
-            for event in events {
-                if let Some(event_name) = &event.name {
-                    let name_str = event_name.to_string_lossy();
-                    if !name_str.starts_with("event") {
-                        continue;
-                    }
-                    let path = Path::new(INPUT_DIR).join(&*name_str);
-                    thread::sleep(Duration::from_millis(100));
+            let new_node = events.iter().any(|e| {
+                e.name.as_ref().is_some_and(|n| n.to_string_lossy().starts_with("event"))
+            });
+            if !new_node {
+                continue;
+            }
 
-                    match Device::open(&path) {
-                        Ok(dev) => {
-                            if self.matches_device(&dev) {
-                                info!("Found device at {}", path.display());
-                                return Ok(dev);
-                            }
-                        }
-                        Err(e) => {
-                            debug!("Cannot open new device {}: {}", path.display(), e);
-                        }
-                    }
+            // A node is not usable the instant it appears: udev still has to
+            // apply permissions, and a uhid node's uniq is filled in after
+            // the node shows up. Probing once right after the event loses
+            // that race often enough to matter, and since the event is
+            // consumed the device would then be ignored until it connects
+            // again, which is why it took a power cycle to come good. Rescan
+            // over a short window instead of trusting a single probe.
+            for _ in 0..SETTLE_ATTEMPTS {
+                thread::sleep(SETTLE_INTERVAL);
+                if let Some(dev) = self.scan_for_device()? {
+                    return Ok(dev);
                 }
             }
+            debug!("New input node did not match within the settle window");
         }
     }
 
