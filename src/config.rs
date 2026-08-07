@@ -27,6 +27,9 @@ pub struct DeviceConfig {
     pub name: Option<String>,
     pub uniq: Option<String>,
     pub grab: bool,
+    /// Whether the file said so. Blocks added by the pairing side never do, and
+    /// those are the ones the worker is allowed to downgrade to a shared open.
+    pub grab_explicit: bool,
     pub keyboard_layout: Option<String>,
     pub mappings: HashMap<Key, String>,
     pub long_press_mappings: HashMap<Key, String>,
@@ -81,6 +84,7 @@ impl DeviceConfig {
             name: None,
             uniq: None,
             grab: true,
+            grab_explicit: false,
             keyboard_layout: None,
             mappings: HashMap::new(),
             long_press_mappings: HashMap::new(),
@@ -204,7 +208,10 @@ impl Config {
                 None => {
                     if let Some(v) = get(entries, "name") { dev.name = Some(v.to_string()); }
                     if let Some(v) = get(entries, "uniq") { dev.uniq = Some(v.to_string()); }
-                    if let Some(v) = get(entries, "grab") { dev.grab = parse_bool(v); }
+                    if let Some(v) = get(entries, "grab") {
+                        dev.grab = parse_bool(v);
+                        dev.grab_explicit = true;
+                    }
                     dev.keyboard_layout = get(entries, "keyboard_layout")
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
@@ -342,6 +349,20 @@ mod tests {
         assert!(dev.dpad_mappings[&DpadDirection::Left].ends_with("key.sh KEY_LEFT"));
         assert!(dev.mappings[&Key::new(304)].ends_with("key.sh KEY_ENTER"));
         assert!(dev.mappings[&Key::new(311)].ends_with("key.sh page_next"));
+    }
+
+    #[test]
+    fn grab_is_only_explicit_when_the_file_says_so() {
+        // The worker downgrades an implicit grab on anything that isn't a
+        // gamepad, so the difference has to survive the parse.
+        let cfg = load_str(
+            "kbm-grab.ini",
+            "[device.pad]\nuniq = AA:BB:CC:DD:EE:FF\n\n[device.kbd]\nuniq = 11:22:33:44:55:66\ngrab = true\n",
+        );
+        let pad = cfg.devices.iter().find(|d| d.id == "pad").expect("pad");
+        assert!(pad.grab && !pad.grab_explicit);
+        let kbd = cfg.devices.iter().find(|d| d.id == "kbd").expect("kbd");
+        assert!(kbd.grab && kbd.grab_explicit);
     }
 
     #[test]
