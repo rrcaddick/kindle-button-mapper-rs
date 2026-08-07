@@ -198,7 +198,7 @@ fn device_worker(mut cfg: config::DeviceConfig, settings: WorkerSettings) {
     loop {
         let handler = InputHandler::new(cfg.name.clone(), cfg.uniq.clone(), cfg.grab);
         match handler.open() {
-            Ok(mut device) => {
+            Ok((mut device, grabbed_at_open)) => {
                 // Only the opened node says whether this is a pad or a
                 // keyboard, and the two want opposite treatment.
                 let gamepad = is_gamepad(&device);
@@ -219,27 +219,53 @@ fn device_worker(mut cfg: config::DeviceConfig, settings: WorkerSettings) {
                     }
                 }
 
-                // A keyboard is shared with the rest of the system. Holding it
-                // exclusively would swallow every key this config does not
-                // name, so downgrade to a shared open unless the file asked
-                // for the grab by hand. Pairing-written blocks never do.
-                let mut grab = cfg.grab;
-                if grab && !cfg.grab_explicit && !gamepad {
+                // Three ways to own a device. Grabbing it exclusively is right
+                // for a pad, where an unmapped button should do nothing, and
+                // wrong for a keyboard, where it would swallow every key this
+                // config does not name. Passthrough is the middle ground: hold
+                // the device, but relay what we don't map. Nothing to guess
+                // when the file says so, otherwise decide from the node.
+                let mut grab = effective_grab(&cfg, gamepad) && grabbed_at_open;
+                if grabbed_at_open && !grab {
                     match device.ungrab() {
-                        Ok(()) => {
-                            grab = false;
-                            info!("[{}] not a gamepad, sharing it instead of grabbing", cfg.id);
+                        Ok(()) => info!("[{}] not a gamepad, sharing it instead of grabbing", cfg.id),
+                        Err(e) => {
+                            warn!("[{}] cannot release the grab: {}", cfg.id, e);
+                            grab = true;
                         }
-                        Err(e) => warn!("[{}] cannot release the grab: {}", cfg.id, e),
                     }
                 }
+                // Relaying keys we do not hold would deliver every keystroke
+                // twice, once from us and once from whoever does hold it.
+                if cfg.passthrough && !grab {
+                    warn!(
+                        "[{}] passthrough needs the exclusive grab and something else has it, relaying is off",
+                        cfg.id
+                    );
+                    cfg.passthrough = false;
+                    mapper = build(&cfg);
+                }
+                if grab && cfg.passthrough && !vkeyboard::available() {
+                    warn!(
+                        "[{}] passthrough is on but there is no uinput keyboard, unmapped keys will be lost",
+                        cfg.id
+                    );
+                }
 
-                info!("[{}] device connected", cfg.id);
+                info!(
+                    "[{}] device connected ({})",
+                    cfg.id,
+                    match (grab, cfg.passthrough) {
+                        (false, _) => "shared",
+                        (true, true) => "exclusive, unmapped keys passed through",
+                        (true, false) => "exclusive",
+                    }
+                );
                 if let Some(ref script) = settings.on_connect {
                     info!("[{}] running on_connect script", cfg.id);
                     execute_script(script);
                 }
-                match run_event_loop(&mut device, &mut mapper, grab,
+                match run_event_loop(&mut device, &mut mapper, grab, gamepad,
                     &mut cfg, &mut generation, &settings) {
                     Exit::Removed => {
                         drop(device);
@@ -269,12 +295,14 @@ fn run_event_loop(
     device: &mut evdev::Device,
     mapper: &mut Mapper,
     grab: bool,
+    gamepad: bool,
     cfg: &mut config::DeviceConfig,
     generation: &mut u64,
     settings: &WorkerSettings,
 ) -> Exit {
     // Non-blocking + poll so we can notice a capture pause while idle.
     set_nonblocking(device.as_raw_fd());
+    let mut grab = grab;
     let mut grabbed = grab;
 
     let mut last_poke: Option<Instant> = if settings.keep_awake {
@@ -298,6 +326,21 @@ fn run_event_loop(
                         settings.repeat_ms,
                         settings.log_buttons,
                     );
+                    // Switching who owns the device has to bite now rather
+                    // than on the next reconnect, or the toggle looks broken.
+                    let want = effective_grab(&fresh, gamepad);
+                    if want != grab {
+                        let changed = if want { device.grab() } else { device.ungrab() };
+                        match changed {
+                            Ok(()) => {
+                                grab = want;
+                                grabbed = want;
+                                info!("[{}] now {}", cfg.id,
+                                    if want { "holding the device" } else { "sharing the device" });
+                            }
+                            Err(e) => warn!("[{}] cannot change who holds the device: {}", cfg.id, e),
+                        }
+                    }
                     *cfg = fresh;
                 }
                 None => {
@@ -384,6 +427,13 @@ fn run_event_loop(
             }
         }
     }
+}
+
+/// Whether the daemon should hold this device exclusively. An explicit `grab`
+/// in the file is taken at its word; without one only a gamepad is claimed,
+/// since grabbing a keyboard would swallow every key nothing maps.
+fn effective_grab(cfg: &config::DeviceConfig, gamepad: bool) -> bool {
+    cfg.grab && (cfg.grab_explicit || gamepad)
 }
 
 fn is_gamepad(dev: &evdev::Device) -> bool {

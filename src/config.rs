@@ -30,6 +30,9 @@ pub struct DeviceConfig {
     /// Whether the file said so. Blocks added by the pairing side never do, and
     /// those are the ones the worker is allowed to downgrade to a shared open.
     pub grab_explicit: bool,
+    /// Re-emit keys with no mapping through the virtual keyboard. Only means
+    /// anything alongside a grab, and it is what makes a keyboard survive one.
+    pub passthrough: bool,
     pub keyboard_layout: Option<String>,
     pub mappings: HashMap<Key, String>,
     pub long_press_mappings: HashMap<Key, String>,
@@ -78,6 +81,11 @@ impl DeviceConfig {
             && self.trigger_longpress_mappings.is_empty()
     }
 
+    #[cfg(test)]
+    pub fn for_test(id: &str) -> Self {
+        Self::new(id.to_string())
+    }
+
     fn new(id: String) -> Self {
         Self {
             id,
@@ -85,6 +93,7 @@ impl DeviceConfig {
             uniq: None,
             grab: true,
             grab_explicit: false,
+            passthrough: false,
             keyboard_layout: None,
             mappings: HashMap::new(),
             long_press_mappings: HashMap::new(),
@@ -212,6 +221,7 @@ impl Config {
                         dev.grab = parse_bool(v);
                         dev.grab_explicit = true;
                     }
+                    if let Some(v) = get(entries, "passthrough") { dev.passthrough = parse_bool(v); }
                     dev.keyboard_layout = get(entries, "keyboard_layout")
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
@@ -363,6 +373,18 @@ mod tests {
         assert!(pad.grab && !pad.grab_explicit);
         let kbd = cfg.devices.iter().find(|d| d.id == "kbd").expect("kbd");
         assert!(kbd.grab && kbd.grab_explicit);
+    }
+
+    #[test]
+    fn passthrough_is_off_unless_asked_for() {
+        let cfg = load_str(
+            "kbm-passthrough.ini",
+            "[device.pad]\nuniq = AA:BB:CC:DD:EE:FF\n\n[device.kbd]\nuniq = 11:22:33:44:55:66\ngrab = true\npassthrough = true\n",
+        );
+        let pad = cfg.devices.iter().find(|d| d.id == "pad").expect("pad");
+        assert!(!pad.passthrough);
+        let kbd = cfg.devices.iter().find(|d| d.id == "kbd").expect("kbd");
+        assert!(kbd.passthrough && kbd.grab && kbd.grab_explicit);
     }
 
     #[test]

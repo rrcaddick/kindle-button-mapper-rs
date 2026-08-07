@@ -38,7 +38,7 @@ impl InputHandler {
         }
     }
 
-    pub fn open(&self) -> Result<Device, String> {
+    pub fn open(&self) -> Result<(Device, bool), String> {
         let has_identity = self.device_uniq.as_deref().is_some_and(|u| !u.is_empty())
             || self.device_name.as_deref().is_some_and(|n| !n.is_empty());
         if !has_identity {
@@ -142,13 +142,20 @@ impl InputHandler {
         }
     }
 
-    fn finish_open(&self, mut device: Device) -> Result<Device, String> {
+    /// The device, and whether the exclusive grab was actually taken. A failed
+    /// grab is not fatal, but the caller has to know: whoever holds it still
+    /// gets the events, so anything that assumes exclusivity would double up.
+    fn finish_open(&self, mut device: Device) -> Result<(Device, bool), String> {
         if device.name().unwrap_or("") == "kindle-button-mapper" {
             return Err("Refusing to read our own virtual keyboard".to_string());
         }
+        let mut grabbed = false;
         if self.grab {
             match device.grab() {
-                Ok(()) => info!("Grabbed device exclusively"),
+                Ok(()) => {
+                    grabbed = true;
+                    info!("Grabbed device exclusively");
+                }
                 Err(e) => warn!("Cannot grab device: {}, continuing without exclusive access", e),
             }
         } else {
@@ -157,7 +164,7 @@ impl InputHandler {
         info!("Reading events from {} (uniq={:?})",
             device.name().unwrap_or("?"),
             device.unique_name().unwrap_or(""));
-        Ok(device)
+        Ok((device, grabbed))
     }
 }
 
