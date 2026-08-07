@@ -1,5 +1,6 @@
 use crate::action;
 use crate::config::{DeviceConfig, DpadDirection, Trigger};
+use crate::vkeyboard;
 use evdev::Key;
 use log::{debug, info};
 use std::collections::HashMap;
@@ -16,6 +17,7 @@ pub struct Mapper {
     long_press_ms: u64,
     repeat_ms: u64,
     log_buttons: bool,
+    passthrough: bool,
     last_press: HashMap<Key, Instant>,
     press_start: HashMap<Key, Instant>,
     long_press_fired: HashMap<Key, bool>,
@@ -53,6 +55,7 @@ impl Mapper {
             long_press_ms,
             repeat_ms,
             log_buttons,
+            passthrough: cfg.passthrough,
             last_press: HashMap::new(),
             press_start: HashMap::new(),
             long_press_fired: HashMap::new(),
@@ -70,7 +73,29 @@ impl Mapper {
         }
     }
 
+    /// Whether this key belongs to the mapper. Anything else is the device's
+    /// own, and in passthrough mode it has to keep working.
+    fn claims(&self, key: Key) -> bool {
+        self.mappings.contains_key(&key) || self.long_press_mappings.contains_key(&key)
+    }
+
+    /// Relay a key the mapper grabbed but does not want. Debounce and the
+    /// press bookkeeping are for firing actions, a relayed keystroke is
+    /// passed on exactly as it arrived.
+    fn relay(&self, key: Key, value: i32) -> bool {
+        if !self.passthrough || self.claims(key) {
+            return false;
+        }
+        if !vkeyboard::forward(key.code(), value) {
+            debug!("Passthrough dropped {:?}, no virtual keyboard", key);
+        }
+        true
+    }
+
     pub fn handle_press(&mut self, key: Key) {
+        if self.relay(key, 1) {
+            return;
+        }
         // Debounce check
         if let Some(last) = self.last_press.get(&key) {
             if last.elapsed() < Duration::from_millis(self.debounce_ms) {
@@ -102,6 +127,9 @@ impl Mapper {
     }
 
     pub fn handle_held(&mut self, key: Key) {
+        if self.relay(key, 2) {
+            return;
+        }
         // Check if we've started long press mode
         let long_press_active = self.long_press_fired.get(&key).copied().unwrap_or(false);
 
@@ -146,6 +174,9 @@ impl Mapper {
     }
 
     pub fn handle_release(&mut self, key: Key) {
+        if self.relay(key, 0) {
+            return;
+        }
         // A debounced press never registers in press_start, so its release
         // must not fire the action either.
         let had_press = self.press_start.remove(&key).is_some();
@@ -375,4 +406,44 @@ impl Mapper {
 
 fn execute_script(script: &str) {
     action::run(script);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DeviceConfig;
+
+    fn mapper(passthrough: bool, mapped: &[u16]) -> Mapper {
+        let mut cfg = DeviceConfig::for_test("dev");
+        cfg.passthrough = passthrough;
+        for code in mapped {
+            cfg.mappings.insert(Key::new(*code), "/bin/true".into());
+        }
+        Mapper::new(&cfg, 0, 500, 100, false)
+    }
+
+    #[test]
+    fn passthrough_relays_only_what_is_not_mapped() {
+        let m = mapper(true, &[30]);
+        // Mapped, so the mapper runs the action rather than relaying the key.
+        assert!(!m.relay(Key::new(30), 1));
+        // Not mapped, so it has to keep typing.
+        assert!(m.relay(Key::new(31), 1));
+    }
+
+    #[test]
+    fn without_passthrough_nothing_is_relayed() {
+        let m = mapper(false, &[30]);
+        assert!(!m.relay(Key::new(30), 1));
+        assert!(!m.relay(Key::new(31), 1));
+    }
+
+    #[test]
+    fn a_long_press_mapping_also_claims_the_key() {
+        let mut cfg = DeviceConfig::for_test("dev");
+        cfg.passthrough = true;
+        cfg.long_press_mappings.insert(Key::new(30), "/bin/true".into());
+        let m = Mapper::new(&cfg, 0, 500, 100, false);
+        assert!(!m.relay(Key::new(30), 1));
+    }
 }

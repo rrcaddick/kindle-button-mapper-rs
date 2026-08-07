@@ -114,6 +114,36 @@ pub fn inject(request: &str) -> bool {
     true
 }
 
+/// Whether there is a uinput keyboard to emit into at all. Passthrough is a
+/// promise the daemon cannot keep without one.
+pub fn available() -> bool {
+    INJECTOR
+        .get()
+        .map(|i| i.lock().unwrap_or_else(|p| p.into_inner()).dev.is_some())
+        .unwrap_or(false)
+}
+
+/// Re-emit a key the mapper grabbed but has no mapping for, so a device the
+/// mapper owns exclusively still types. `value` is evdev's own: 1 press,
+/// 0 release, 2 repeat. False means there is no uinput keyboard to emit into,
+/// in which case the key is simply lost and the caller should say so.
+pub fn forward(code: u16, value: i32) -> bool {
+    let Some(injector) = INJECTOR.get() else {
+        return false;
+    };
+    let mut injector = injector.lock().unwrap_or_else(|p| p.into_inner());
+    let Some(ref mut dev) = injector.dev else {
+        return false;
+    };
+    if let Err(e) = write_event(dev, EV_KEY, code, value)
+        .and_then(|()| write_event(dev, EV_SYN, SYN_REPORT, 0))
+    {
+        warn!("Forwarding key {} failed: {}", code, e);
+        return false;
+    }
+    true
+}
+
 /// Serve key injection requests on a FIFO, one key name (or code) per line.
 ///
 /// scripts/key.sh writes to it, so nothing on the device needs an external

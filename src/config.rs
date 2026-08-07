@@ -1,5 +1,6 @@
 use configparser::ini::Ini;
 use evdev::Key;
+use log::info;
 use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
@@ -26,6 +27,12 @@ pub struct DeviceConfig {
     pub name: Option<String>,
     pub uniq: Option<String>,
     pub grab: bool,
+    /// Whether the file said so. Blocks added by the pairing side never do, and
+    /// those are the ones the worker is allowed to downgrade to a shared open.
+    pub grab_explicit: bool,
+    /// Re-emit keys with no mapping through the virtual keyboard. Only means
+    /// anything alongside a grab, and it is what makes a keyboard survive one.
+    pub passthrough: bool,
     pub keyboard_layout: Option<String>,
     pub mappings: HashMap<Key, String>,
     pub long_press_mappings: HashMap<Key, String>,
@@ -35,13 +42,58 @@ pub struct DeviceConfig {
     pub trigger_longpress_mappings: HashMap<Trigger, String>,
 }
 
+const KEY_SH: &str = "/mnt/us/kindle-button-mapper/scripts/key.sh";
+
 impl DeviceConfig {
+    /// The default gamepad layout, arrows on the D-pad, Enter/Back on A and B,
+    /// page turns on the shoulders. The worker applies it when an unmapped
+    /// device turns out to be a gamepad, so a pad added through the app drives
+    /// KOReader before anyone maps a button. Config load can't decide this,
+    /// only the opened node's capabilities say what the device is.
+    pub fn apply_default_layout(&mut self) {
+        for (dir, key) in [
+            (DpadDirection::Up, "KEY_UP"),
+            (DpadDirection::Down, "KEY_DOWN"),
+            (DpadDirection::Left, "KEY_LEFT"),
+            (DpadDirection::Right, "KEY_RIGHT"),
+        ] {
+            self.dpad_mappings.insert(dir, format!("{} {}", KEY_SH, key));
+        }
+        // BTN_A, BTN_B, BTN_TL, BTN_TR.
+        for (code, key) in [
+            (304u16, "KEY_ENTER"),
+            (305, "KEY_BACK"),
+            (310, "page_prev"),
+            (311, "page_next"),
+        ] {
+            self.mappings
+                .insert(Key::new(code), format!("{} {}", KEY_SH, key));
+        }
+        info!("[{}] no mappings configured, using the default gamepad layout", self.id);
+    }
+
+    pub fn is_unmapped(&self) -> bool {
+        self.mappings.is_empty()
+            && self.long_press_mappings.is_empty()
+            && self.dpad_mappings.is_empty()
+            && self.dpad_longpress_mappings.is_empty()
+            && self.trigger_mappings.is_empty()
+            && self.trigger_longpress_mappings.is_empty()
+    }
+
+    #[cfg(test)]
+    pub fn for_test(id: &str) -> Self {
+        Self::new(id.to_string())
+    }
+
     fn new(id: String) -> Self {
         Self {
             id,
             name: None,
             uniq: None,
             grab: true,
+            grab_explicit: false,
+            passthrough: false,
             keyboard_layout: None,
             mappings: HashMap::new(),
             long_press_mappings: HashMap::new(),
@@ -165,7 +217,11 @@ impl Config {
                 None => {
                     if let Some(v) = get(entries, "name") { dev.name = Some(v.to_string()); }
                     if let Some(v) = get(entries, "uniq") { dev.uniq = Some(v.to_string()); }
-                    if let Some(v) = get(entries, "grab") { dev.grab = parse_bool(v); }
+                    if let Some(v) = get(entries, "grab") {
+                        dev.grab = parse_bool(v);
+                        dev.grab_explicit = true;
+                    }
+                    if let Some(v) = get(entries, "passthrough") { dev.passthrough = parse_bool(v); }
                     dev.keyboard_layout = get(entries, "keyboard_layout")
                         .map(str::trim)
                         .filter(|v| !v.is_empty())
@@ -268,5 +324,78 @@ fn parse_trigger(s: &str) -> Option<Trigger> {
         "lt" | "left" => Some(Trigger::LT),
         "rt" | "right" => Some(Trigger::RT),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn load_str(name: &str, body: &str) -> Config {
+        let path = std::env::temp_dir().join(name);
+        let mut f = std::fs::File::create(&path).expect("write test config");
+        f.write_all(body.as_bytes()).expect("write test config");
+        Config::load(&path).expect("load test config")
+    }
+
+    #[test]
+    fn load_leaves_an_unmapped_device_unmapped() {
+        // The worker decides on defaults from the opened node's capabilities;
+        // load must not guess.
+        let cfg = load_str(
+            "kbm-defaults.ini",
+            "[device.pad]\nuniq = AA:BB:CC:DD:EE:FF\n",
+        );
+        assert!(cfg.devices[0].is_unmapped());
+    }
+
+    #[test]
+    fn default_layout_covers_dpad_and_face_buttons() {
+        let mut dev = DeviceConfig::new("pad".into());
+        dev.apply_default_layout();
+        assert!(!dev.is_unmapped());
+        assert_eq!(dev.dpad_mappings.len(), 4);
+        assert!(dev.dpad_mappings[&DpadDirection::Left].ends_with("key.sh KEY_LEFT"));
+        assert!(dev.mappings[&Key::new(304)].ends_with("key.sh KEY_ENTER"));
+        assert!(dev.mappings[&Key::new(311)].ends_with("key.sh page_next"));
+    }
+
+    #[test]
+    fn grab_is_only_explicit_when_the_file_says_so() {
+        // The worker downgrades an implicit grab on anything that isn't a
+        // gamepad, so the difference has to survive the parse.
+        let cfg = load_str(
+            "kbm-grab.ini",
+            "[device.pad]\nuniq = AA:BB:CC:DD:EE:FF\n\n[device.kbd]\nuniq = 11:22:33:44:55:66\ngrab = true\n",
+        );
+        let pad = cfg.devices.iter().find(|d| d.id == "pad").expect("pad");
+        assert!(pad.grab && !pad.grab_explicit);
+        let kbd = cfg.devices.iter().find(|d| d.id == "kbd").expect("kbd");
+        assert!(kbd.grab && kbd.grab_explicit);
+    }
+
+    #[test]
+    fn passthrough_is_off_unless_asked_for() {
+        let cfg = load_str(
+            "kbm-passthrough.ini",
+            "[device.pad]\nuniq = AA:BB:CC:DD:EE:FF\n\n[device.kbd]\nuniq = 11:22:33:44:55:66\ngrab = true\npassthrough = true\n",
+        );
+        let pad = cfg.devices.iter().find(|d| d.id == "pad").expect("pad");
+        assert!(!pad.passthrough);
+        let kbd = cfg.devices.iter().find(|d| d.id == "kbd").expect("kbd");
+        assert!(kbd.passthrough && kbd.grab && kbd.grab_explicit);
+    }
+
+    #[test]
+    fn one_hand_mapped_button_counts_as_mapped() {
+        let cfg = load_str(
+            "kbm-nodefaults.ini",
+            "[device.pad]\nuniq = AA:BB:CC:DD:EE:FF\n\n[device.pad.buttons]\n304 = /mnt/us/mine.sh\n",
+        );
+        let dev = &cfg.devices[0];
+        assert!(!dev.is_unmapped());
+        assert!(dev.dpad_mappings.is_empty());
+        assert_eq!(dev.mappings[&Key::new(304)], "/mnt/us/mine.sh");
     }
 }
