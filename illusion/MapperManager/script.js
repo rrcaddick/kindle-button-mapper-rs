@@ -181,6 +181,13 @@ var MapperManager = (function() {
             .replace(/"/g, "&quot;");
     }
 
+    // A Bluetooth node's uniq carries the address type as a suffix
+    // ("E0:F6:B5:BC:1C:7F/P"); configs hold the bare MAC. Compare and store
+    // only the address part, uppercased.
+    function bareUniq(s) {
+        return String(s || "").split("/")[0].replace(/^\s+|\s+$/g, "").toUpperCase();
+    }
+
     function showMessage(text, isError) {
         var bar = getEl("messageBar");
         bar.innerHTML = escapeHtml(text);
@@ -512,14 +519,14 @@ var MapperManager = (function() {
     }
 
     function resolveDevicePath(id, cb) {
-        var uniq = getValue("device." + id, "uniq") || "";
+        var uniq = bareUniq(getValue("device." + id, "uniq") || "");
         var name = getValue("device." + id, "name") || "";
         getJSON("/devices", function(data, err) {
             if (err) { cb(null, "Devices: " + err); return; }
             var list = data.devices || [];
             var match = null;
             for (var i = 0; i < list.length; i++) {
-                if (uniq && list[i].uniq === uniq) {
+                if (uniq && bareUniq(list[i].uniq || "") === uniq) {
                     match = list[i];
                     break;
                 }
@@ -894,7 +901,7 @@ var MapperManager = (function() {
             showMessage("Name needs at least one letter or digit", true);
             return;
         }
-        var uniq = (getEl("devDetailUniq").value || "").replace(/^\s+|\s+$/g, "");
+        var uniq = bareUniq(getEl("devDetailUniq").value);
         if (!uniq && !name) {
             showMessage("Set a name or MAC", true);
             return;
