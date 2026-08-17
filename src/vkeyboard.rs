@@ -44,14 +44,21 @@ const ABS_MT_PRESSURE: u16 = 0x3a;
 /// A page turn's shape, taken from a recording of a real finger on the panel
 /// rather than from the spec.
 ///
-/// The sample spacing is the number that matters: the panel reports about
-/// every 15ms, and the X multitouch driver is happiest fed at the rate it
-/// expects. Fourteen samples at that spacing is a ~220ms swipe, inside the
-/// 300-600ms a human takes but still quick enough not to feel laggy.
-const SWIPE_STEPS: i32 = 14;
-const SWIPE_STEP_MS: u64 = 16;
-const SWIPE_FROM_PCT: i32 = 85;
-const SWIPE_TO_PCT: i32 = 15;
+/// Kept deliberately short. The reader starts repainting while the contact is
+/// still down, and on this hardware that starves whatever thread is feeding
+/// the panel: asking for 16ms between samples measured 16ms for the first few
+/// and then 100ms and worse, stretching the gesture past 800ms, by which point
+/// it is too slow to read as a swipe at all and the page turn is dropped. Ten
+/// samples over ~100ms of requested time finishes before the repaint gets
+/// going, and still lands inside the 300-600ms a real finger takes once the
+/// scheduler has had its way with it.
+const SWIPE_STEPS: i32 = 10;
+const SWIPE_STEP_MS: u64 = 10;
+/// Travel enough of the width to be unambiguous without needing the whole
+/// screen — a shorter path is a shorter gesture, and a real page-turn swipe
+/// does not cross edge to edge either.
+const SWIPE_FROM_PCT: i32 = 80;
+const SWIPE_TO_PCT: i32 = 25;
 const SWIPE_Y_PCT: i32 = 50;
 
 /// The contact id every real touch on this panel carries.
