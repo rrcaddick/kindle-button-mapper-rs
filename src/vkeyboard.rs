@@ -61,6 +61,18 @@ const SWIPE_FROM_PCT: i32 = 80;
 const SWIPE_TO_PCT: i32 = 25;
 const SWIPE_Y_PCT: i32 = 50;
 
+/// The quiet the reader needs between one contact lifting and the next
+/// landing.
+///
+/// Without it the reader freezes: three swipes 120ms apart is enough for
+/// Amazon's watchdog to report "UI FREEZE DETECTED" and kill KPPMainAppV2.
+/// Its gesture handling is written for a finger, and a finger cannot lift and
+/// swipe again in a tenth of a second — nor can the e-ink finish repainting
+/// the page it was already given. Requests are paced rather than dropped, so
+/// a handful of quick presses still turns a page each; they just arrive at a
+/// rate the reader survives.
+const SWIPE_MIN_GAP_MS: u64 = 500;
+
 /// The contact id every real touch on this panel carries.
 ///
 /// Not a counter. The hardware reports 0 for the contact and -1 to release it,
@@ -369,6 +381,8 @@ struct Touchscreen {
     /// the Paperwhite 4 land between 16 and 30, so a middling value passes for
     /// one; panels with a smaller range get something inside theirs.
     touch_size: i32,
+    /// When the last contact lifted, so the next one can wait its turn.
+    last_lift: Option<std::time::Instant>,
 }
 
 impl Touchscreen {
@@ -403,6 +417,7 @@ impl Touchscreen {
                     max_x,
                     max_y,
                     touch_size: if max_touch > 0 { max_touch.min(24) } else { 24 },
+                    last_lift: None,
                 });
             }
         }
@@ -417,6 +432,15 @@ impl Touchscreen {
     /// coordinate that moved, and the last one just releases. Sending more
     /// than the panel itself would is what upsets the X driver.
     fn swipe(&mut self, forward: bool) -> io::Result<()> {
+        // Let the previous contact go before laying down another. Only a
+        // second swipe treading on the first one's heels waits here.
+        if let Some(lift) = self.last_lift {
+            let gap = std::time::Duration::from_millis(SWIPE_MIN_GAP_MS);
+            let since = lift.elapsed();
+            if since < gap {
+                thread::sleep(gap - since);
+            }
+        }
         if self.node.is_none() {
             self.node = Some(OpenOptions::new().write(true).open(&self.path)?);
         }
@@ -452,7 +476,9 @@ impl Touchscreen {
 
         thread::sleep(step);
         write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, TOUCH_RELEASE)?;
-        write_event(dev, EV_SYN, SYN_REPORT, 0)
+        write_event(dev, EV_SYN, SYN_REPORT, 0)?;
+        self.last_lift = Some(std::time::Instant::now());
+        Ok(())
     }
 }
 
