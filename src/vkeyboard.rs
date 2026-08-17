@@ -440,14 +440,18 @@ impl Touchscreen {
     }
 }
 
-/// A real panel: absolute multitouch coordinates, built into the device, and
-/// not something we made ourselves. A gamepad has axes too but is not on the
-/// host bus, and a pen digitizer reports no MT position.
+/// A real panel: absolute multitouch coordinates on a device you touch
+/// directly, and not something we made ourselves.
+///
+/// INPUT_PROP_DIRECT is the check that matters, not the bus. Panels do not sit
+/// on BUS_HOST the way the page buttons do — the Paperwhite 4's goodix-ts is
+/// BUS_I2C — while a trackpad or a gamepad carries absolute axes without ever
+/// claiming to be the surface under the image.
 fn is_touchscreen(dev: evdev::Device) -> bool {
     if dev.name() == Some(DEV_NAME_STR) {
         return false;
     }
-    if dev.input_id().bus_type() != evdev::BusType::BUS_HOST {
+    if !dev.properties().contains(evdev::PropType::DIRECT) {
         return false;
     }
     dev.supported_absolute_axes().is_some_and(|a| {
