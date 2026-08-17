@@ -30,27 +30,41 @@ const KEY_PAGEDOWN: u16 = 109;
 const EV_SYN: u16 = 0x00;
 const SYN_REPORT: u16 = 0x00;
 
-// Multitouch protocol B, for the swipe page turn.
+// Multitouch axes, for the swipe page turn. No ABS_MT_SLOT and no BTN_TOUCH:
+// the panel reports neither, so sending them only tells the X driver a story
+// its own hardware never would.
 const EV_ABS: u16 = 0x03;
-const ABS_MT_SLOT: u16 = 0x2f;
 const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
 const ABS_MT_WIDTH_MAJOR: u16 = 0x32;
 const ABS_MT_POSITION_X: u16 = 0x35;
 const ABS_MT_POSITION_Y: u16 = 0x36;
 const ABS_MT_TRACKING_ID: u16 = 0x39;
 const ABS_MT_PRESSURE: u16 = 0x3a;
-const BTN_TOUCH: u16 = 0x14a;
 
-/// A page turn's shape: how far across the screen, how many samples, and how
-/// long it takes. The reader decides swipe-or-not from the contact's speed and
-/// distance, so these are the numbers that make it a page turn rather than a
-/// tap or a drag. Measured working over the whole 90..400ms range on a
-/// Paperwhite 4; 150ms sits in the middle of it.
-const SWIPE_STEPS: i32 = 12;
-const SWIPE_MS: u64 = 150;
+/// A page turn's shape, taken from a recording of a real finger on the panel
+/// rather than from the spec.
+///
+/// The sample spacing is the number that matters: the panel reports about
+/// every 15ms, and the X multitouch driver is happiest fed at the rate it
+/// expects. Fourteen samples at that spacing is a ~220ms swipe, inside the
+/// 300-600ms a human takes but still quick enough not to feel laggy.
+const SWIPE_STEPS: i32 = 14;
+const SWIPE_STEP_MS: u64 = 16;
 const SWIPE_FROM_PCT: i32 = 85;
 const SWIPE_TO_PCT: i32 = 15;
 const SWIPE_Y_PCT: i32 = 50;
+
+/// The contact id every real touch on this panel carries.
+///
+/// Not a counter. The hardware reports 0 for the contact and -1 to release it,
+/// and never anything else — a recording of seven finger gestures used exactly
+/// {0, -1}. Handing the X multitouch driver a fresh id per swipe instead makes
+/// it believe an unbounded number of distinct fingers have touched the screen,
+/// and after a handful it segfaults and takes the whole framework down with
+/// it. Emitting ABS_MT_SLOT has the same flavour of problem: the panel never
+/// sends it, so neither do we.
+const TOUCH_ID: i32 = 0;
+const TOUCH_RELEASE: i32 = -1;
 
 ioctl_none!(ui_dev_create, b'U', 1);
 ioctl_write_int!(ui_set_evbit, b'U', 100);
@@ -344,11 +358,10 @@ struct Touchscreen {
     node: Option<File>,
     max_x: i32,
     max_y: i32,
-    /// Contact ids must stay inside the panel's ABS_MT_TRACKING_ID range: the
-    /// kernel clamps anything larger, and a clamped id repeated across swipes
-    /// reads as one finger that never lifted.
-    tracking: i32,
-    max_tracking: i32,
+    /// What a fingertip reports for pressure and contact size. Real touches on
+    /// the Paperwhite 4 land between 16 and 30, so a middling value passes for
+    /// one; panels with a smaller range get something inside theirs.
+    touch_size: i32,
 }
 
 impl Touchscreen {
@@ -375,17 +388,14 @@ impl Touchscreen {
             };
             let max_x = abs[ABS_MT_POSITION_X as usize].maximum;
             let max_y = abs[ABS_MT_POSITION_Y as usize].maximum;
-            let max_tracking = abs[ABS_MT_TRACKING_ID as usize].maximum;
+            let max_touch = abs[ABS_MT_TOUCH_MAJOR as usize].maximum;
             if max_x > 0 && max_y > 0 {
                 return Some(Touchscreen {
                     path,
                     node: None,
                     max_x,
                     max_y,
-                    tracking: 0,
-                    // A panel that declares no range still needs ids to vary,
-                    // and every one of them has at least a handful of slots.
-                    max_tracking: if max_tracking > 0 { max_tracking } else { 255 },
+                    touch_size: if max_touch > 0 { max_touch.min(24) } else { 24 },
                 });
             }
         }
@@ -394,6 +404,11 @@ impl Touchscreen {
 
     /// Drag one contact across the screen: right-to-left turns forward, the
     /// same way a finger does.
+    ///
+    /// Shaped after a recording of a real finger: the opening report carries
+    /// the contact and its size, each later report carries only the
+    /// coordinate that moved, and the last one just releases. Sending more
+    /// than the panel itself would is what upsets the X driver.
     fn swipe(&mut self, forward: bool) -> io::Result<()> {
         if self.node.is_none() {
             self.node = Some(OpenOptions::new().write(true).open(&self.path)?);
@@ -406,36 +421,30 @@ impl Touchscreen {
         let x0 = self.max_x * from_pct / 100;
         let x1 = self.max_x * to_pct / 100;
         let y = self.max_y * SWIPE_Y_PCT / 100;
-        self.tracking = self.tracking % self.max_tracking.max(1) + 1;
-        let id = self.tracking;
+        let touch = self.touch_size;
 
         let dev = self.node.as_mut().expect("opened above");
-        write_event(dev, EV_ABS, ABS_MT_SLOT, 0)?;
-        write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, id)?;
+        write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, TOUCH_ID)?;
+        write_event(dev, EV_ABS, ABS_MT_PRESSURE, touch)?;
         write_event(dev, EV_ABS, ABS_MT_POSITION_X, x0)?;
         write_event(dev, EV_ABS, ABS_MT_POSITION_Y, y)?;
-        write_event(dev, EV_ABS, ABS_MT_PRESSURE, 40)?;
-        write_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, 24)?;
-        write_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, 24)?;
-        // Dropped by the kernel on panels that do not carry it.
-        write_event(dev, EV_KEY, BTN_TOUCH, 1)?;
+        write_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, touch)?;
+        write_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, touch)?;
         write_event(dev, EV_SYN, SYN_REPORT, 0)?;
 
-        // One sample per report, spaced in time. Batching them into one write
-        // gives every position the same timestamp, and a contact that appears
-        // to cross the screen instantly is not a swipe.
-        let step = std::time::Duration::from_millis(SWIPE_MS / SWIPE_STEPS as u64);
+        // One sample per report, spaced at the panel's own report rate.
+        // Batching them into a single write would give every position the
+        // same kernel timestamp, and a contact that crosses the screen
+        // instantly is not a swipe.
+        let step = std::time::Duration::from_millis(SWIPE_STEP_MS);
         for i in 1..=SWIPE_STEPS {
             thread::sleep(step);
             write_event(dev, EV_ABS, ABS_MT_POSITION_X, x0 + (x1 - x0) * i / SWIPE_STEPS)?;
-            write_event(dev, EV_ABS, ABS_MT_POSITION_Y, y)?;
-            write_event(dev, EV_ABS, ABS_MT_PRESSURE, 40)?;
             write_event(dev, EV_SYN, SYN_REPORT, 0)?;
         }
 
-        write_event(dev, EV_ABS, ABS_MT_SLOT, 0)?;
-        write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1)?;
-        write_event(dev, EV_KEY, BTN_TOUCH, 0)?;
+        thread::sleep(step);
+        write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, TOUCH_RELEASE)?;
         write_event(dev, EV_SYN, SYN_REPORT, 0)
     }
 }
