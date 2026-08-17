@@ -30,6 +30,28 @@ const KEY_PAGEDOWN: u16 = 109;
 const EV_SYN: u16 = 0x00;
 const SYN_REPORT: u16 = 0x00;
 
+// Multitouch protocol B, for the swipe page turn.
+const EV_ABS: u16 = 0x03;
+const ABS_MT_SLOT: u16 = 0x2f;
+const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
+const ABS_MT_WIDTH_MAJOR: u16 = 0x32;
+const ABS_MT_POSITION_X: u16 = 0x35;
+const ABS_MT_POSITION_Y: u16 = 0x36;
+const ABS_MT_TRACKING_ID: u16 = 0x39;
+const ABS_MT_PRESSURE: u16 = 0x3a;
+const BTN_TOUCH: u16 = 0x14a;
+
+/// A page turn's shape: how far across the screen, how many samples, and how
+/// long it takes. The reader decides swipe-or-not from the contact's speed and
+/// distance, so these are the numbers that make it a page turn rather than a
+/// tap or a drag. Measured working over the whole 90..400ms range on a
+/// Paperwhite 4; 150ms sits in the middle of it.
+const SWIPE_STEPS: i32 = 12;
+const SWIPE_MS: u64 = 150;
+const SWIPE_FROM_PCT: i32 = 85;
+const SWIPE_TO_PCT: i32 = 15;
+const SWIPE_Y_PCT: i32 = 50;
+
 ioctl_none!(ui_dev_create, b'U', 1);
 ioctl_write_int!(ui_set_evbit, b'U', 100);
 ioctl_write_int!(ui_set_keybit, b'U', 101);
@@ -212,8 +234,8 @@ impl Injector {
         let Injector { dev, pager } = self;
         match line {
             "" => (),
-            "page_next" => pager.turn(dev.as_mut(), KEY_PAGEDOWN, KEY_DOWN),
-            "page_prev" => pager.turn(dev.as_mut(), KEY_PAGEUP, KEY_UP),
+            "page_next" => pager.turn(dev.as_mut(), KEY_PAGEDOWN, KEY_DOWN, true),
+            "page_prev" => pager.turn(dev.as_mut(), KEY_PAGEUP, KEY_UP, false),
             _ => match crate::config::parse_key(line) {
                 Some(key) => match dev {
                     Some(vkbd) => {
@@ -234,28 +256,50 @@ impl Injector {
 /// Kindles with physical page buttons carry them on their own node, and the
 /// framework only turns pages for that node, ignoring page keys from any
 /// keyboard. Writing to an evdev node injects into the device itself, so a
-/// page turn goes in as if the button had been pressed. Models without the
-/// buttons take KEY_DOWN/KEY_UP on the virtual keyboard instead.
+/// page turn goes in as if the button had been pressed.
+///
+/// Models without the buttons get a swipe across the touchscreen. They used
+/// to get KEY_DOWN/KEY_UP on the virtual keyboard, but the native reader
+/// ignores keys entirely — measured on a Paperwhite 4 running 5.18, where
+/// fourteen different keycodes were injected, verified to reach a properly
+/// tagged keyboard node, and not one moved the page. Nothing upstream could
+/// tell, because injecting *succeeds*: the key is delivered, it just does
+/// nothing, so the page turn silently did nothing too.
+///
+/// A swipe rather than a tap because a tap is a stationary contact: two in
+/// quick succession read as a double tap and a slow one as a long press,
+/// either of which selects a word and opens the dictionary instead of turning
+/// the page. A moving contact can be neither.
 enum Pager {
     Buttons { path: PathBuf, node: Option<File> },
+    Touchscreen(Touchscreen),
     VirtualKeyboard,
 }
 
 impl Pager {
     fn find() -> Self {
-        match page_button_node() {
-            Some(path) => {
-                info!("Page turns go to the page buttons at {}", path.display());
-                Pager::Buttons { path, node: None }
+        if let Some(path) = page_button_node() {
+            info!("Page turns go to the page buttons at {}", path.display());
+            return Pager::Buttons { path, node: None };
+        }
+        match Touchscreen::find() {
+            Some(touch) => {
+                info!(
+                    "No page buttons found, page turns swipe the touchscreen at {} ({}x{})",
+                    touch.path.display(),
+                    touch.max_x,
+                    touch.max_y
+                );
+                Pager::Touchscreen(touch)
             }
             None => {
-                info!("No page buttons found, page turns go to the virtual keyboard");
+                info!("No page buttons or touchscreen found, page turns go to the virtual keyboard");
                 Pager::VirtualKeyboard
             }
         }
     }
 
-    fn turn(&mut self, vkbd: Option<&mut File>, button_code: u16, kbd_code: u16) {
+    fn turn(&mut self, vkbd: Option<&mut File>, button_code: u16, kbd_code: u16, forward: bool) {
         match self {
             Pager::Buttons { path, node } => {
                 if node.is_none() {
@@ -274,6 +318,13 @@ impl Pager {
                     *node = None;
                 }
             }
+            Pager::Touchscreen(touch) => {
+                if let Err(e) = touch.swipe(forward) {
+                    warn!("Page turn swipe on {} failed: {}", touch.path.display(), e);
+                    // Reopen next time, the node may have gone away.
+                    touch.node = None;
+                }
+            }
             Pager::VirtualKeyboard => match vkbd {
                 Some(vkbd) => {
                     if let Err(e) = tap(vkbd, kbd_code) {
@@ -285,6 +336,124 @@ impl Pager {
             },
         }
     }
+}
+
+/// The panel, and the geometry a page-turn swipe needs.
+struct Touchscreen {
+    path: PathBuf,
+    node: Option<File>,
+    max_x: i32,
+    max_y: i32,
+    /// Contact ids must stay inside the panel's ABS_MT_TRACKING_ID range: the
+    /// kernel clamps anything larger, and a clamped id repeated across swipes
+    /// reads as one finger that never lifted.
+    tracking: i32,
+    max_tracking: i32,
+}
+
+impl Touchscreen {
+    fn find() -> Option<Self> {
+        let mut found: Vec<PathBuf> = fs::read_dir(DEV_INPUT)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("event"))
+            })
+            .filter(|p| evdev::Device::open(p).is_ok_and(is_touchscreen))
+            .collect();
+        found.sort();
+
+        for path in found {
+            let Ok(dev) = evdev::Device::open(&path) else {
+                continue;
+            };
+            let Ok(abs) = dev.get_abs_state() else {
+                continue;
+            };
+            let max_x = abs[ABS_MT_POSITION_X as usize].maximum;
+            let max_y = abs[ABS_MT_POSITION_Y as usize].maximum;
+            let max_tracking = abs[ABS_MT_TRACKING_ID as usize].maximum;
+            if max_x > 0 && max_y > 0 {
+                return Some(Touchscreen {
+                    path,
+                    node: None,
+                    max_x,
+                    max_y,
+                    tracking: 0,
+                    // A panel that declares no range still needs ids to vary,
+                    // and every one of them has at least a handful of slots.
+                    max_tracking: if max_tracking > 0 { max_tracking } else { 255 },
+                });
+            }
+        }
+        None
+    }
+
+    /// Drag one contact across the screen: right-to-left turns forward, the
+    /// same way a finger does.
+    fn swipe(&mut self, forward: bool) -> io::Result<()> {
+        if self.node.is_none() {
+            self.node = Some(OpenOptions::new().write(true).open(&self.path)?);
+        }
+        let (from_pct, to_pct) = if forward {
+            (SWIPE_FROM_PCT, SWIPE_TO_PCT)
+        } else {
+            (SWIPE_TO_PCT, SWIPE_FROM_PCT)
+        };
+        let x0 = self.max_x * from_pct / 100;
+        let x1 = self.max_x * to_pct / 100;
+        let y = self.max_y * SWIPE_Y_PCT / 100;
+        self.tracking = self.tracking % self.max_tracking.max(1) + 1;
+        let id = self.tracking;
+
+        let dev = self.node.as_mut().expect("opened above");
+        write_event(dev, EV_ABS, ABS_MT_SLOT, 0)?;
+        write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, id)?;
+        write_event(dev, EV_ABS, ABS_MT_POSITION_X, x0)?;
+        write_event(dev, EV_ABS, ABS_MT_POSITION_Y, y)?;
+        write_event(dev, EV_ABS, ABS_MT_PRESSURE, 40)?;
+        write_event(dev, EV_ABS, ABS_MT_TOUCH_MAJOR, 24)?;
+        write_event(dev, EV_ABS, ABS_MT_WIDTH_MAJOR, 24)?;
+        // Dropped by the kernel on panels that do not carry it.
+        write_event(dev, EV_KEY, BTN_TOUCH, 1)?;
+        write_event(dev, EV_SYN, SYN_REPORT, 0)?;
+
+        // One sample per report, spaced in time. Batching them into one write
+        // gives every position the same timestamp, and a contact that appears
+        // to cross the screen instantly is not a swipe.
+        let step = std::time::Duration::from_millis(SWIPE_MS / SWIPE_STEPS as u64);
+        for i in 1..=SWIPE_STEPS {
+            thread::sleep(step);
+            write_event(dev, EV_ABS, ABS_MT_POSITION_X, x0 + (x1 - x0) * i / SWIPE_STEPS)?;
+            write_event(dev, EV_ABS, ABS_MT_POSITION_Y, y)?;
+            write_event(dev, EV_ABS, ABS_MT_PRESSURE, 40)?;
+            write_event(dev, EV_SYN, SYN_REPORT, 0)?;
+        }
+
+        write_event(dev, EV_ABS, ABS_MT_SLOT, 0)?;
+        write_event(dev, EV_ABS, ABS_MT_TRACKING_ID, -1)?;
+        write_event(dev, EV_KEY, BTN_TOUCH, 0)?;
+        write_event(dev, EV_SYN, SYN_REPORT, 0)
+    }
+}
+
+/// A real panel: absolute multitouch coordinates, built into the device, and
+/// not something we made ourselves. A gamepad has axes too but is not on the
+/// host bus, and a pen digitizer reports no MT position.
+fn is_touchscreen(dev: evdev::Device) -> bool {
+    if dev.name() == Some(DEV_NAME_STR) {
+        return false;
+    }
+    if dev.input_id().bus_type() != evdev::BusType::BUS_HOST {
+        return false;
+    }
+    dev.supported_absolute_axes().is_some_and(|a| {
+        a.contains(evdev::AbsoluteAxisType::ABS_MT_POSITION_X)
+            && a.contains(evdev::AbsoluteAxisType::ABS_MT_POSITION_Y)
+    })
 }
 
 fn page_button_node() -> Option<PathBuf> {
